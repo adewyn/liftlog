@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -10,7 +10,7 @@ const COACH_MARK = { up: '▲', down: '▼', reps: '↗', hold: '→', beat: '�
 const DEFAULT_SETTINGS = {
   restSec: 90, sound: true, lastBackup: null,
   proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
-  reminder: { on: false, time: '09:00', id: null },
+  reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', id: null },
 };
 // The weigh-in reminder server (server/push in this folder) and its public key.
 const PUSH_URL = 'https://liftlog-push.sporebound.workers.dev';
@@ -527,6 +527,13 @@ function celebrateDay() {
     setTimeout(() => toast(n > 1 ? `🔥 ${n}-day streak! Today counts.` : '🔥 Day 1. Your streak starts now.'), 900);
   }
   S.celebrated = { date: today, done };
+  // Tell the reminder server today counts (once a day), and leave the streak where sw.js can read it.
+  if (done && S.activePinged !== today && S.settings.reminder.id && (S.settings.reminder.on || S.settings.reminder.streakOn)) {
+    S.activePinged = today;
+    pushApi('active', { id: S.settings.reminder.id }).catch(() => { S.activePinged = null; });
+  }
+  const st = JSON.stringify({ date: today, n: dailyStreak(), done });
+  if (st !== S.savedStreak) { S.savedStreak = st; DB.put('kv', { k: 'streak', v: JSON.parse(st) }); }
 }
 function streakCard() {
   const today = todayStr(), n = dailyStreak(), best = Math.max(bestStreak(), n), done = dayCounts(today);
@@ -1064,19 +1071,22 @@ function reminderCard() {
   const can = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   let body;
   if (!isStandalone() && /iPhone|iPad/.test(navigator.userAgent)) {
-    body = `<div class="muted small">Open Lift Log from your Home Screen icon to turn this on. iPhone only allows notifications for installed web apps.</div>`;
+    body = `<div class="muted small">Open Lift Log from your Home Screen icon to turn these on. iPhone only allows notifications for installed web apps.</div>`;
   } else if (!can) {
     body = `<div class="muted small">This browser can't show notifications. On iPhone you need iOS 16.4 or newer and the Home Screen app.</div>`;
   } else {
-    body = `<label class="lbl" for="rem-time">Time</label>
-      <input class="inp" type="time" id="rem-time" value="${r.time}" style="font-size:22px;font-weight:700">
-      <div class="btn-row" style="margin-top:10px">
-        <button class="btn ${r.on ? '' : 'pri'}" data-a="${r.on ? 'rem-off' : 'rem-on'}">${r.on ? 'Turn off' : 'Turn on'}</button>
-        ${r.on ? '<button class="btn" data-a="rem-test">Send a test</button>' : ''}
+    const row = (k, title, sub, timeId, time) => `
+      <div class="rem-row">
+        <div><b>${title}</b><small>${sub}</small></div>
+        <button class="toggle ${r[k] ? 'on' : ''}" data-a="rem-toggle" data-k="${k}" aria-pressed="${r[k]}">${r[k] ? 'On' : 'Off'}</button>
       </div>
-      <div class="sh-hint">${r.on ? `On: every day at ${fmtTime(r.time)}. ` : ''}It skips days you've already logged your weight.</div>`;
+      <input class="inp" type="time" id="${timeId}" value="${time}" style="font-size:20px;font-weight:700">`;
+    body = `${row('on', 'Weigh-in', "Skipped once you've weighed in that day.", 'rem-time', r.time)}
+      <div style="height:16px"></div>
+      ${row('streakOn', 'Streak saver', "Only if you haven't trained, weighed in, or hit protein yet.", 'rem-streak-time', r.streakTime)}
+      ${r.on || r.streakOn ? '<button class="btn block" style="margin-top:14px" data-a="rem-test">Send a test</button>' : ''}`;
   }
-  return `<h2>Weigh-in reminder</h2><div class="card">${body}</div>`;
+  return `<h2>Reminders</h2><div class="card">${body}</div>`;
 }
 
 function viewProgDay() {
@@ -1201,7 +1211,7 @@ function exSheetHTML() {
     </div>`;
 }
 
-// ---------- weigh-in reminder ----------
+// ---------- reminders (weigh-in and streak saver) ----------
 const isStandalone = () => navigator.standalone || matchMedia('(display-mode: standalone)').matches;
 const fmtTime = t => { const [h, m] = t.split(':').map(Number); return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
 const b64uBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), ch => ch.charCodeAt(0));
@@ -1218,31 +1228,47 @@ async function reminderSync() {
   let sub = await reg.pushManager.getSubscription();
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(VAPID_PUBLIC) });
   r.id = r.id || uid('r');
-  await pushApi('subscribe', { id: r.id, sub: sub.toJSON(), time: r.time, tz: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  await pushApi('subscribe', {
+    id: r.id, sub: sub.toJSON(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    time: r.time, weighOn: r.on, streakTime: r.streakTime, streakOn: r.streakOn,
+  });
+  if (dayCounts(todayStr())) { S.activePinged = todayStr(); await pushApi('active', { id: r.id }); }
 }
-async function reminderOn() {
-  try {
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') { toast('Notifications are off for Lift Log. Turn them on in iPhone Settings → Notifications.'); return; }
-    await reminderSync();
-    S.settings.reminder.on = true;
-    saveSettings(); render();
-    toast(`Reminder set for ${fmtTime(S.settings.reminder.time)} every day`);
-  } catch (err) {
-    toast(`Couldn't turn it on: ${err.message}`);
-  }
-}
-async function reminderOff() {
+async function reminderToggle(k) {
   const r = S.settings.reminder;
-  r.on = false;
+  const name = k === 'on' ? 'Weigh-in reminder' : 'Streak saver';
+  const time = k === 'on' ? r.time : r.streakTime;
+  if (!r[k]) {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { toast('Notifications are off for Lift Log. Turn them on in iPhone Settings → Notifications.'); return; }
+      r[k] = true;
+      await reminderSync();
+      saveSettings(); render();
+      toast(`${name} set for ${fmtTime(time)}`);
+    } catch (err) {
+      r[k] = false;
+      render();
+      toast(`Couldn't turn it on: ${err.message}`);
+    }
+    return;
+  }
+  r[k] = false;
   saveSettings(); render();
-  toast('Reminder off');
+  toast(`${name} off`);
+  if (r.on || r.streakOn) { reminderSync().catch(() => {}); return; }
   try { if (r.id) await pushApi('unsubscribe', { id: r.id }); } catch (err) { /* offline: the server drops it once pushes start failing */ }
   try { const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (sub) await sub.unsubscribe(); } catch (err) { /* ignore */ }
 }
 function reminderWeighed() {
   const r = S.settings.reminder;
-  if (r.on && r.id) pushApi('weighed', { id: r.id }).catch(() => {});
+  if ((r.on || r.streakOn) && r.id) pushApi('weighed', { id: r.id }).catch(() => {});
+}
+function reminderTimeChanged(field, value) {
+  const r = S.settings.reminder;
+  r[field] = value;
+  saveSettings();
+  if (r.on || r.streakOn) reminderSync().then(() => toast(`Moved to ${fmtTime(value)}`)).catch(err => toast(`Couldn't update: ${err.message}`));
 }
 
 // ---------- backup ----------
@@ -1442,8 +1468,7 @@ const ACT = {
   'set-rest': d => { S.settings.restSec = Math.max(15, Math.min(600, S.settings.restSec + +d.d)); saveSettings(); render(); },
   'prot-mode': d => { S.settings.proteinMode = d.v; saveSettings(); render(); },
   'set-perlb': d => { S.settings.proteinPerLb = Math.max(0.5, Math.min(1.5, round2(S.settings.proteinPerLb + +d.d))); saveSettings(); render(); },
-  'rem-on': () => reminderOn(),
-  'rem-off': () => reminderOff(),
+  'rem-toggle': d => reminderToggle(d.k),
   'rem-test': () => {
     pushApi('test', { id: S.settings.reminder.id })
       .then(() => toast('Sending in 5 seconds. Go to your Home Screen to see it.'))
@@ -1493,11 +1518,9 @@ document.addEventListener('change', ev => {
     if (S.bodyDate === todayStr() && b.weight != null) reminderWeighed();
     render();
   } else if (el.id === 'rem-time' && el.value) {
-    const r = S.settings.reminder;
-    r.time = el.value;
-    saveSettings();
-    if (r.on) reminderSync().then(() => toast(`Reminder moved to ${fmtTime(r.time)}`)).catch(err => toast(`Couldn't update: ${err.message}`));
-    else render();
+    reminderTimeChanged('time', el.value);
+  } else if (el.id === 'rem-streak-time' && el.value) {
+    reminderTimeChanged('streakTime', el.value);
   } else if (el.id === 'import-file') {
     importData(el.files[0]);
     el.value = '';
@@ -1536,10 +1559,10 @@ document.addEventListener('visibilitychange', () => {
   render();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', ev => {
-      if (ev.data && ev.data.open) { S.tab = ev.data.open; S.view = null; S.bodyDate = todayStr(); closeSheet(); render(); scrollTo(0, 0); }
+      if (ev.data && ev.data.open) { S.tab = ev.data.open; S.view = null; S.bodyDate = todayStr(); S.pickDay = null; closeSheet(); render(); scrollTo(0, 0); }
     });
   }
-  if (S.settings.reminder.on && navigator.onLine) reminderSync().catch(() => {});
+  if ((S.settings.reminder.on || S.settings.reminder.streakOn) && navigator.onLine) reminderSync().catch(() => {});
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }

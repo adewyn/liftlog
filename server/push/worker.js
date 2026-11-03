@@ -1,7 +1,9 @@
 // Weigh-in reminder server for Lift Log. Deploy from this folder with: npx wrangler deploy
-// It keeps only each phone's push address, reminder time, and time zone (no workout data),
-// and every 15 minutes sends a reminder to anyone whose time has come and who hasn't weighed in yet.
-// The pushes carry no data, so the notification text lives in the app's sw.js.
+// It keeps only each phone's push address, reminder times, time zone, and the last day it weighed in
+// or did anything (no workout data). Every 15 minutes it sends:
+//   - the weigh-in reminder, unless they've already weighed in that day
+//   - the streak saver, unless they've already done something that day
+// The pushes carry no data; the app's sw.js works out which one it is and what to say.
 
 const ALLOWED_ORIGINS = ['https://adewyn.github.io', 'http://localhost:8790'];
 const PUSH_HOSTS = [/(^|\.)push\.apple\.com$/, /^fcm\.googleapis\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /\.notify\.windows\.com$/];
@@ -31,11 +33,17 @@ export default {
       let host;
       try { host = new URL(body.sub.endpoint).hostname; } catch { return reply({ error: 'bad subscription' }, 400); }
       if (!PUSH_HOSTS.some(r => r.test(host))) return reply({ error: 'unknown push service' }, 400);
-      if (!/^\d{2}:\d{2}$/.test(body.time || '')) return reply({ error: 'bad time' }, 400);
+      const hhmm = /^\d{2}:\d{2}$/;
+      if (!hhmm.test(body.time || '') || (body.streakTime && !hhmm.test(body.streakTime))) return reply({ error: 'bad time' }, 400);
       try { localNow(body.tz); } catch { return reply({ error: 'bad time zone' }, 400); }
       if (!subs[id] && Object.keys(subs).length >= MAX_SUBS) return reply({ error: 'server is full' }, 503);
       const old = subs[id] || {};
-      subs[id] = { endpoint: body.sub.endpoint, time: body.time, tz: body.tz, lastSent: old.lastSent || '', weighed: old.weighed || '' };
+      subs[id] = {
+        endpoint: body.sub.endpoint, tz: body.tz,
+        time: body.time, weighOn: body.weighOn !== false,
+        streakTime: body.streakTime || '14:00', streakOn: !!body.streakOn,
+        lastSent: old.lastSent || '', lastStreak: old.lastStreak || '', weighed: old.weighed || '', active: old.active || '',
+      };
       await saveSubs(env, subs);
       return reply({ ok: true });
     }
@@ -48,8 +56,10 @@ export default {
       await saveSubs(env, subs);
       return reply({ ok: true });
     }
-    if (path === 'weighed') {
-      sub.weighed = localNow(sub.tz).date;
+    if (path === 'weighed' || path === 'active') {
+      const today = localNow(sub.tz).date;
+      if (path === 'weighed') sub.weighed = today;
+      sub.active = today;
       await saveSubs(env, subs);
       return reply({ ok: true });
     }
@@ -66,13 +76,15 @@ export default {
     let changed = false;
     for (const [id, s] of Object.entries(subs)) {
       const { date, minutes } = localNow(s.tz);
-      const [h, m] = s.time.split(':').map(Number);
-      const due = h * 60 + m;
-      // Send in the first hour after the chosen time, once a day, unless they've already weighed in.
-      if (minutes < due || minutes >= due + 60 || s.lastSent === date || s.weighed === date) continue;
+      // Due in the first hour after the chosen time.
+      const due = t => { const [h, m] = t.split(':').map(Number); return minutes >= h * 60 + m && minutes < h * 60 + m + 60; };
+      let field = null;
+      if (s.weighOn !== false && due(s.time) && s.lastSent !== date && s.weighed !== date) field = 'lastSent';
+      else if (s.streakOn && due(s.streakTime || '14:00') && s.lastStreak !== date && s.active !== date) field = 'lastStreak';
+      if (!field) continue;
       const res = await sendPush(env, s.endpoint);
       if (res.gone) delete subs[id];
-      else if (res.ok) s.lastSent = date;
+      else if (res.ok) s[field] = date;
       changed = true;
     }
     if (changed) await saveSubs(env, subs);

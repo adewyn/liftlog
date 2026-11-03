@@ -318,6 +318,15 @@ textarea.inp { min-height: 104px; padding: 12px 14px; resize: vertical; line-hei
 .streak { display: flex; align-items: center; gap: 14px; }
 .streak .big-num { color: var(--acc); }
 .top-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.rem-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.rem-row > div { flex: 1; min-width: 0; }
+.rem-row b { display: block; font-size: 17px; }
+.rem-row small { display: block; color: var(--mut); font-size: 13px; margin-top: 1px; }
+.toggle {
+  flex: none; min-width: 64px; min-height: 40px; padding: 0 14px; border-radius: 999px;
+  background: var(--s3); color: var(--mut); font-weight: 750;
+}
+.toggle.on { background: var(--acc); color: var(--acc-ink); }
 .streak-pill {
   min-height: 36px; padding: 0 12px; border-radius: 999px;
   background: var(--s2); color: var(--mut);
