@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -247,7 +247,9 @@ function flushSaves() {
 const getW = id => S.workouts.find(w => w.id === id) || (S.draft && S.draft.id === id ? S.draft : null);
 const sortedW = () => [...S.workouts].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
 const doneSets = e => e.sets.filter(s => s.done && s.w !== '' && s.r !== '');
-const hasWork = w => (w.exercises || []).some(e => doneSets(e).length) || (w.activities || []).length > 0;
+// An activity counts once it has something in it (yoga counts as soon as it's logged).
+const actDone = a => a.type === 'yoga' || +a.dist > 0 || +a.min > 0 || +a.hr > 0 || +a.sec > 0;
+const hasWork = w => (w.exercises || []).some(e => doneSets(e).length) || (w.activities || []).some(actDone);
 
 // A session comes from a weekday in the program, one of your saved workouts, or a blank one ('free').
 const isDayKey = k => DAYS.includes(k);
@@ -335,7 +337,8 @@ function coachPlan(t, recent, opts = {}) {
   if (last.sets.length >= t.sets && reps.every(r => r >= hi)) {
     if (!top) return plan('reps', prev, reps.map(r => r + 1), `You hit ${hi} on every set. Add a little weight or slow the reps down.`);
     if (holdWhy) return plan('hold', prev, reps, `You earned a jump to ${round2(top + jumpFor(t, top))} lb, but ${holdWhy}, so stay at ${top} today. It'll be waiting next time.`);
-    const easy = last.sets.every(x => x.rir != null && x.rir >= 3);
+    const lastRir = last.sets[last.sets.length - 1].rir;
+    const easy = lastRir != null && lastRir >= 3;
     const w = round2(top + jumpFor(t, top) * (easy ? 2 : 1));
     return plan('up', fill(w), fill(lo), easy ? `You hit ${hi} on every set with reps to spare, so it's a bigger jump to ${w} lb. Aim for ${lo} or more.` : `You hit ${hi} on every set last time, so it's up to ${w} lb. Aim for ${lo} or more.`);
   }
@@ -350,7 +353,7 @@ function coachPlan(t, recent, opts = {}) {
     return plan('hold', prev, reps.map(r => Math.max(r, lo)), `Stay at ${wTxt(top)} and get ${lo} on every set.`);
   }
   if (opts.energy === 'low') return plan('hold', prev, reps, `Low energy today, so just match last time at ${wTxt(top)}.`);
-  if (last.sets.every(x => x.rir === 0)) return plan('hold', prev, reps, `Those sets were all-out, so match them at ${wTxt(top)} before adding reps.`);
+  if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi)) return plan('hold', prev, reps, `Your last set was all-out, so match last time at ${wTxt(top)} before adding reps.`);
   return plan('reps', prev,
     Array.from({ length: t.sets }, (_, k) => Math.min(hi, at(reps, k) + 1)),
     `Same weight. Go for one more rep per set (top of the range is ${hi}).`);
@@ -401,7 +404,7 @@ function fillSets(e, w) {
   e.coach = plan ? { kind: plan.kind, note: plan.note, from: plan.from, w: plan.w, prev: plan.prev } : null;
   const extra = deload ? `Deload week: ${Math.ceil(t.sets / 2) === 1 ? '1 set' : `${Math.ceil(t.sets / 2)} sets`}${plan ? " at last time's weights" : ''}, about 3 reps left in the tank.`
     : low ? '2 sets today. Stop each one with 2 or 3 reps left in the tank.' : '';
-  if (extra) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
+  if (extra && !plan) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
   const n = deload ? Math.ceil(t.sets / 2) : low ? Math.min(2, t.sets) : t.sets;
   const done = e.sets.filter(s => s.done);
   e.sets = done.concat(Array.from({ length: Math.max(0, n - done.length) }, (_, m) => {
@@ -486,7 +489,7 @@ function weeklyVolume(ws) {
 // A quick ramp before the first big lift of the session (and the first big leg lift): about 50% for 8, then 70% for 3.
 function warmupFor(w, i) {
   const e = w.exercises[i];
-  if (w.date !== todayStr() || e.sets.some(x => x.done)) return '';
+  if (w.date !== todayStr()) return '';
   const firstOf = f => w.exercises.findIndex(x => targetOf(x).kind !== 'iso' && f(targetOf(x)));
   if (i !== firstOf(() => true) && i !== firstOf(t => t.body === 'lower')) return '';
   const wt = +(e.sets.find(x => x.w !== '') || {}).w || 0;
@@ -495,14 +498,6 @@ function warmupFor(w, i) {
   return `Warm up first (not logged): ${r(0.5)} × 8, then ${r(0.7)} × 3.`;
 }
 // After a set: how many more could you have done? Easy early sets move the next ones up a step.
-function rirAdjust(w, e, j) {
-  const t = targetOf(e), s = e.sets[j], lo = t.min ?? t.max, step = t.inc || UP, w0 = +s.w;
-  if (lo == null || !w0 || s.rir < 3 || j > 1 || +s.r < lo || w.deload || energyFor(w.date) === 'low') return '';
-  const rest = e.sets.filter((x, k) => k > j && !x.done && +x.w === w0);
-  if (!rest.length) return '';
-  rest.forEach(x => { x.w = round2(w0 + step); });
-  return `Plenty left in the tank. Next set +${step} lb.`;
-}
 // A lighter week after about 7 weeks of steady training, or sooner when 3 or more lifts have stalled.
 function deloadState(date) {
   const st = S.settings, mk = `${date}|${S.ver}|${st.deloadUntil}|${st.deloadSnooze}|${st.deloadLast}`;
@@ -545,7 +540,42 @@ function tick(w, i, j) {
   const s = w.exercises[i].sets[j];
   if (s.done) { s.done = false; persist(w); render(); return; }
   if (s.w === '' || s.r === '') { openSetSheet(w, i, j); return; }
-  logSet(w, i, j);
+  const next = nextSet(w, i, j);
+  keepInPlace(next ? setSel(w, ...next) : setSel(w, i, j), () => logSet(w, i, j));
+  if (next) showAboveTimer(setSel(w, ...next));
+}
+// The next set to do: the rest of this round in a superset (A1, B1, then A2…), then the next exercise.
+function nextSet(w, i, j) {
+  const ex = w.exercises, grp = ex.map((e, k) => k).filter(k => ex[k].group === ex[i].group);
+  const rounds = Math.max(...grp.map(k => ex[k].sets.length));
+  for (let jj = j; jj < rounds; jj++) {
+    for (const k of grp) if ((jj > j || k > i) && ex[k].sets[jj] && !ex[k].sets[jj].done) return [k, jj];
+  }
+  for (const k of grp) { const jj = ex[k].sets.findIndex(x => !x.done); if (jj >= 0 && !(k === i && jj === j)) return [k, jj]; }
+  for (let k = 0; k < ex.length; k++) {
+    if (grp.includes(k)) continue;
+    const jj = ex[k].sets.findIndex(x => !x.done);
+    if (jj >= 0 && k > i) return [k, jj];
+  }
+  return null;
+}
+const setSel = (w, i, j) => `.check[data-wid="${w.id}"][data-ex="${i}"][data-s="${j}"]`;
+// Re-render without the page jumping: whatever is at `sel` stays where it was on screen.
+function keepInPlace(sel, fn) {
+  const a = document.querySelector(sel), t = a && a.getBoundingClientRect().top;
+  fn();
+  const b = document.querySelector(sel);
+  if (a && b) window.scrollBy(0, b.getBoundingClientRect().top - t);
+}
+// Make sure a set row sits between the header and the rest timer.
+function showAboveTimer(sel) {
+  const el = document.querySelector(sel);
+  if (!el) return;
+  const r = el.closest('.set').getBoundingClientRect();
+  const timer = $('#timer'), tabs = $('#tabs');
+  const floor = (timer && !timer.hidden ? timer.getBoundingClientRect().top : tabs ? tabs.getBoundingClientRect().top : innerHeight) - 12;
+  if (r.bottom > floor) window.scrollBy({ top: r.bottom - floor + 8, behavior: 'smooth' });
+  else if (r.top < 70) window.scrollBy({ top: r.top - 70, behavior: 'smooth' });
 }
 
 function logSet(w, i, j) {
@@ -555,7 +585,7 @@ function logSet(w, i, j) {
   e.sets.forEach((x, k) => { if (k > j && !x.done && x.w === '') x.w = s.w; });
   const today = w.date === todayStr();
   const msgs = [];
-  if (today) { const tip = adjustRest(w, e, j); if (tip) msgs.push(tip); S.rirAsk = { wid: w.id, i, j }; }
+  if (today) { const tip = adjustRest(w, e, j); if (tip) msgs.push(tip); }
   persist(w);
   haptic();
   // In a superset, rest only after the whole round is done.
@@ -658,9 +688,20 @@ let toastTimer;
 function toast(msg, ms) {
   const el = $('#toast');
   el.textContent = msg;
+  el.classList.remove('undo');
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms || (msg.length > 30 ? 3200 : 2200));
+}
+
+// A toast with an Undo button, for about 5 seconds.
+function toastUndo(msg, undo, label = 'Undo', ms = 5000) {
+  const el = $('#toast');
+  el.innerHTML = `<span>${esc(msg)}</span><button>${label}</button>`;
+  el.classList.add('show', 'undo');
+  el.querySelector('button').onclick = () => { el.classList.remove('show', 'undo'); undo(); };
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show', 'undo'), ms);
 }
 
 // ---------- charts ----------
@@ -1119,25 +1160,38 @@ function setEnergy(v) {
 function todaySummary(date, w) {
   const b = bodyEntry(date), target = proteinTargetFor(date), en = energyFor(date);
   let status;
-  const acts = (w.activities || []).length;
+  const acts = (w.activities || []).filter(actDone).length;
   if (w.type === 'strength' && w.exercises.length) status = `${sum(w.exercises.map(e => e.sets.filter(x => x.done).length))}/${sum(w.exercises.map(e => e.sets.length))}`;
-  else if (acts) status = `${acts} logged`;
+  else if (acts) status = 'Done';
   else status = w.type === 'rest' ? 'Rest' : 'Not yet';
   return `<div class="card today-card">
     <div class="day-strip">
-      <button class="${b.weight != null ? 'ok' : ''}" data-a="go-body"><span>Weigh-in</span><b>${b.weight != null ? `${b.weight} lb` : 'Not yet'}</b></button>
-      <button class="${b.protein >= target ? 'ok' : ''}" data-a="go-body"><span>Protein</span><b>${b.protein}/${target}</b></button>
+      <button class="${b.weight != null ? 'ok' : ''}" data-a="go-body"><span>Weigh-in</span><b>${b.weight != null ? b.weight : 'Not yet'}</b></button>
+      <button class="${b.protein >= target ? 'ok' : ''}" data-a="go-body" data-f="food-name"><span>Protein</span><b>${b.protein}/${target}</b></button>
       <button class="${(b.steps || 0) >= S.settings.stepGoal ? 'ok' : ''}" data-a="go-body" data-f="steps-inp"><span>Steps</span><b>${b.steps ? fmtK(b.steps) : '—'}</b></button>
       <button class="${hasWork(w) ? 'ok' : ''}" data-a="scroll-work"><span>${w.type === 'strength' && w.exercises.length ? 'Sets' : w.type === 'rest' ? 'Today' : 'Workout'}</span><b>${status}</b></button>
     </div>
+    ${en && sleepFor(date) != null && !S.checkinOpen ? `<button class="checkin-sum" data-a="checkin-open"><span>Energy <b>${ENERGY[en]}</b> · Sleep <b>${(SLEEP.find(([v]) => v === sleepFor(date)) || [, ''])[1]} hrs</b></span><span class="linkbtn">Change</span></button>` : `
     <div class="energy"><span>Energy</span>
       <div class="seg">${Object.entries(ENERGY).map(([k, n]) => `<button class="${en === k ? 'on' : ''}" data-a="energy" data-v="${k}">${n}</button>`).join('')}</div>
     </div>
     <div class="energy"><span>Sleep hrs</span>
       <div class="seg">${SLEEP.map(([v, n]) => `<button class="${sleepFor(date) === v ? 'on' : ''}" data-a="sleep" data-v="${v}">${n}</button>`).join('')}</div>
-    </div>
+    </div>`}
     <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How do you feel, and how did you sleep? Your plan adjusts to both.'}${sleepShort(date) ? ' Under 6 hours of sleep: no weight jumps and easier cardio today.' : ''}</div>
   </div>`;
+}
+
+function welcomeCard() {
+  if (S.settings.welcomed || S.workouts.some(hasWork)) return '';
+  return `<div class="card tip"><b>Welcome to Lift Log.</b> Today's workout is below: tap a set to change it, then ✓ when it's done. First, check your height and goal in More so protein and calories fit you.
+    <div class="btn-row" style="margin-top:10px"><button class="btn pri" data-a="go-goal">Set up</button><button class="btn" data-a="welcome-done">Got it</button></div></div>`;
+}
+function backupNudge() {
+  const lb = S.settings.lastBackup, n = S.workouts.filter(hasWork).length;
+  if (n < 5 || (lb && Date.now() - lb < 14 * 864e5)) return '';
+  return `<div class="card tip"><b>Back up your log.</b> It lives only on this phone. ${lb ? 'Your last backup was over 2 weeks ago.' : 'You haven\'t saved a backup yet.'}
+    <div class="btn-row" style="margin-top:10px"><button class="btn pri" data-a="export">Save a backup</button></div></div>`;
 }
 
 function weekDoneKeys(ws) {
@@ -1161,7 +1215,7 @@ function viewToday() {
     const t = S.program.days[d].type;
     const cls = [d === w.dayKey ? 'on' : '', d === realKey ? 'today' : '', t === 'rest' ? 'rest' : ''].join(' ');
     return `<button class="chip ${cls}" data-a="pick-day" data-k="${d}">${DAY_SHORT[d]}${done.has(d) ? '<span class="dot"></span>' : ''}</button>`;
-  }).join('') + `<button class="chip ${custom ? 'on' : ''}" data-a="pick-other">${custom ? '✓ Other' : '+ Other'}</button>`;
+  }).join('');
   let body;
   if (w.type === 'strength') body = sessionStrength(w);
   else if (w.type === 'cardio') body = sessionCardio(w);
@@ -1169,16 +1223,19 @@ function viewToday() {
   return `
     <header class="top">
       <div class="top-row">
-        <div class="eyebrow">${esc(fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+        <div class="eyebrow">Today · ${esc(fmtDate(date, { month: 'long', day: 'numeric' }))}</div>
         <button class="streak-pill ${dayCounts(date) ? 'on' : ''}" data-a="tab" data-t="stats" aria-label="Daily streak">🔥 ${dailyStreak()}</button>
       </div>
       ${custom ? `<h1>${esc(w.label)}<span class="sub">${w.dayKey === 'free' ? 'Build it as you go' : 'One of your saved workouts'}</span></h1>`
         : `<h1>${DAY_NAMES[w.dayKey]}<span class="sub">${esc(day.label)}</span></h1>`}
       ${!custom && w.dayKey !== realKey ? `<div class="note-line">Doing ${DAY_NAMES[w.dayKey]}'s session today.</div>` : ''}
     </header>
+    ${welcomeCard()}
     ${todaySummary(date, w)}
-    ${w.type === 'strength' ? deloadCard(date) : ''}
-    <div class="chips">${chips}</div>
+    ${backupNudge()}
+    ${w.type === 'strength' && deloadState(date).active ? deloadCard(date) : ''}
+    <div class="chips days">${chips}</div>
+    <button class="linkbtn diff-btn ${custom ? 'on' : ''}" data-a="pick-other">${custom ? '✓ Doing a different workout · change' : '+ Different workout (saved or blank)'}</button>
     <div id="work"></div>
     ${body}`;
 }
@@ -1191,7 +1248,7 @@ function sessionStrength(w) {
   });
   const cards = groups.map(g => {
     const multi = g.items.length > 1;
-    const up = g.items.some(i => (w.exercises[i].coach || {}).kind === 'up');
+    const up = w.date === todayStr() && g.items.some(i => (w.exercises[i].coach || {}).kind === 'up' && !isFolded(w, i));
     const inner = g.items.map((i, k) => exBlock(w, i, multi ? String.fromCharCode(65 + k) : '')).join('');
     return `<section class="card ${multi ? 'ss' : ''} ${up ? 'up' : ''}">
       ${multi ? '<div class="ss-tag">Superset <span>· alternate, rest after the round</span></div>' : ''}
@@ -1205,7 +1262,7 @@ function sessionStrength(w) {
   const free = w.dayKey === 'free';
   return `${free ? `<div class="card"><label class="lbl" for="wname-${w.id}">Workout name</label>
       <input class="inp" id="wname-${w.id}" data-wid="${w.id}" data-wb="label" value="${esc(w.label)}" placeholder="e.g. Hotel gym"></div>` : ''}
-    ${w.exercises.length && !logged ? '<div class="sh-hint tap-hint">Tap a set to change its weight or reps. Each set can have its own weight.</div>' : ''}
+    ${w.exercises.length && !S.workouts.some(x => (x.exercises || []).some(e => doneSets(e).length)) ? '<div class="sh-hint tap-hint">Tap a set to change its weight or reps, then ✓ when it\'s done. Everything saves as you go.</div>' : ''}
     ${cards || '<div class="card empty"><b>No exercises yet</b>Add your first one below.</div>'}
     <div class="btn-row add-pair">
       <button class="btn" data-a="sx-add" data-wid="${w.id}">+ Exercise</button>
@@ -1215,6 +1272,7 @@ function sessionStrength(w) {
     ${notesCard(w)}
     ${hasWork(w) ? `<div class="sh-hint center" style="margin-bottom:8px">${logged ? `About ${liftMinutes(w)} min lifting` : ''}${kcal ? `${logged ? ' · ' : ''}~${kcal} active cal` : ''}${logged ? ' so far' : ''}</div>` : ''}
     ${free && logged ? `<button class="btn block" data-a="save-plan" data-wid="${w.id}">Save as a workout you can repeat</button>` : ''}
+    ${w.date === todayStr() && !deloadState(w.date).active ? deloadCard(w.date) : ''}
     <button class="btn block big ${w.finishedAt ? 'good' : 'pri'}" data-a="finish" data-wid="${w.id}">
       ${w.finishedAt ? `${ic('check')} Finished · ${logged} of ${total} sets` : `Finish workout · ${logged} of ${total} sets`}
     </button>
@@ -1223,8 +1281,13 @@ function sessionStrength(w) {
 
 function exBlock(w, i, letter) {
   const e = w.exercises[i];
+  if (isFolded(w, i)) {
+    return `<button class="ex ex-fold" data-a="ex-unfold" data-wid="${w.id}" data-ex="${i}">
+      <span class="ex-name">${letter ? `<span class="ss-letter">${letter}</span>` : ''}${esc(e.name)}</span>
+      <span class="fold-sum">${ic('check')} ${e.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</span></button>`;
+  }
   const last = lastPerf(e.key, w);
-  const c = e.coach;
+  const c = w.date === todayStr() ? e.coach : null;
   const unit = e.target.unit === 'steps' ? 'steps' : 'reps';
   const lastTxt = last
     ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>`
@@ -1232,7 +1295,7 @@ function exBlock(w, i, letter) {
   const keepW = (k, s) => (c.prev ? c.prev[Math.min(k, c.prev.length - 1)] : (+s.w === c.w ? c.from : +s.w));
   const canKeep = c && (c.kind === 'up' || c.kind === 'down') && e.sets.some((s, k) => !s.done && +s.w !== keepW(k, s));
   const banner = c ? `<div class="coach coach-${c.kind}"><span>${COACH_MARK[c.kind] || '→'} ${esc(c.note)}</span>
-      ${canKeep ? `<button data-a="keep-w" data-wid="${w.id}" data-ex="${i}">${c.prev && new Set(c.prev).size > 1 ? 'Keep last' : `Keep ${c.from}`}</button>` : ''}</div>` : '';
+      ${canKeep ? `<button data-a="keep-w" data-wid="${w.id}" data-ex="${i}">${c.prev && new Set(c.prev).size > 1 ? 'Stay at last' : `Stay at ${c.from}`}</button>` : ''}</div>` : '';
   const rows = e.sets.map((s, j) => `
     <div class="set ${s.done ? 'done' : ''}">
       <span class="set-no">${j + 1}</span>
@@ -1256,15 +1319,29 @@ function exBlock(w, i, letter) {
     ${banner}
     ${warmupFor(w, i) ? `<div class="warmup">${esc(warmupFor(w, i))}</div>` : ''}
     <div class="sets">${rows}</div>
-    ${S.rirAsk && S.rirAsk.wid === w.id && S.rirAsk.i === i && e.sets[S.rirAsk.j] && e.sets[S.rirAsk.j].done ? `<div class="rir">
-      <span>Set ${S.rirAsk.j + 1}: reps left in the tank?</span>
-      <div class="seg">${[[0, '0'], [1, '1'], [2, '2'], [3, '3+']].map(([v, n]) => `<button class="${e.sets[S.rirAsk.j].rir === v ? 'on' : ''}" data-a="rir" data-wid="${w.id}" data-ex="${i}" data-s="${S.rirAsk.j}" data-v="${v}">${n}</button>`).join('')}</div>
-    </div>` : ''}
+    ${rirAsk(w, i)}
     <div class="ex-tools">
       <button data-a="add-set" data-wid="${w.id}" data-ex="${i}">+ Set</button>
       ${e.sets.length > 1 ? `<button data-a="rm-set" data-wid="${w.id}" data-ex="${i}">− Set</button>` : ''}
     </div>
   </div>`;
+}
+
+// A finished exercise folds to one line once you've moved on (answered the reps question or started the next one).
+function isFolded(w, i) {
+  const e = w.exercises[i];
+  if (w.date !== todayStr() || !e.sets.length || !e.sets.every(s => s.done) || (S.unfold || {})[`${w.id}:${i}`]) return false;
+  const last = e.sets[e.sets.length - 1];
+  return last.rir != null || S.settings.askRir === false || w.exercises.some((x, k) => k > i && x.group !== e.group && x.sets.some(s => s.done));
+}
+// After the last set of an exercise: how many more reps could you have done? Feeds next time's jump.
+function rirAsk(w, i) {
+  const e = w.exercises[i], j = e.sets.length - 1, s = e.sets[j];
+  if (S.settings.askRir === false || w.date !== todayStr() || !e.sets.every(x => x.done) || targetOf(e).unit === 'steps') return '';
+  return `<div class="rir">
+      <span>How hard was the last set? Reps you had left:</span>
+      <div class="seg">${[[0, '0'], [1, '1'], [2, '2'], [3, '3+']].map(([v, n]) => `<button class="${s.rir === v ? 'on' : ''}" data-a="rir" data-wid="${w.id}" data-ex="${i}" data-s="${j}" data-v="${v}">${n}</button>`).join('')}</div>
+    </div>`;
 }
 
 function notesCard(w) {
@@ -1292,13 +1369,14 @@ function sessionCardio(w) {
 function sessionRest(w) {
   const acts = (w.activities || []).length;
   const kcal = acts ? workoutKcal(w) : null;
-  return `${acts ? '' : `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Recover, eat your protein, and sleep well. Missed a session this week? Pick its day above to do it today.</div></div>`}
+  const isToday = w.date === todayStr();
+  return `${acts || !isToday ? '' : `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Recover, eat your protein, and sleep well. Missed a session this week? Pick its day above to do it today.</div></div>`}
     ${actCards(w)}
-    <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Log an activity (a hike, a climb, anything)</button>
+    <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Activity</button>
     ${acts ? `${notesCard(w)}
       ${kcal ? `<div class="sh-hint center" style="margin-bottom:8px">~${kcal} active cal today</div>` : ''}
       <button class="btn block big ${w.finishedAt ? 'good' : 'pri'}" data-a="finish" data-wid="${w.id}">${w.finishedAt ? `${ic('check')} Saved` : 'Save'}</button>`
-    : '<button class="btn block" data-a="go-body">Log bodyweight and protein</button>'}`;
+    : isToday ? '<button class="btn block" data-a="go-body">Log bodyweight and protein</button>' : ''}`;
 }
 function actCards(w, recC) {
   return (w.activities || []).map((a, k) => (a.type === 'yoga' ? yogaCard(w, a, k) : a.type === 'other' ? otherCard(w, a, k) : moveCard(w, a, k, recC))).join('');
@@ -1312,12 +1390,12 @@ function cardioPlan(w, recC) {
   return `<div class="card plan">
     <div class="ss-tag">Today's plan</div>
     <div class="plan-item ${hasYoga ? 'done' : ''}">
-      <div><b>Yoga: ${recY.pick.name}, ${recY.pick.len}</b><small>${esc(recY.why.join(' '))}</small></div>
+      <div><b>Yoga: ${recY.pick.name}, ${recY.pick.len}</b>${hasYoga ? '' : `<small>${esc(recY.why.join(' '))}</small>`}</div>
       ${hasYoga ? ic('check') : `<button class="btn pri" data-a="add-yoga" data-wid="${w.id}" data-id="${recY.pick.id}">Log it</button>`}
     </div>
     ${hasYoga ? '' : `<div class="alt-row"><span>Or:</span>${recY.others.map(c => `<button class="chip" data-a="add-yoga" data-wid="${w.id}" data-id="${c.id}">${c.name} ${c.len}</button>`).join('')}</div>`}
     <div class="plan-item ${hasMove ? 'done' : ''}">
-      <div><b>${esc(recC.text)}</b><small>${esc(recC.why)}</small></div>
+      <div><b>${esc(recC.text)}</b>${hasMove ? '' : `<small>${esc(recC.why)}</small>`}</div>
       ${hasMove ? ic('check') : `<button class="btn pri" data-a="add-act" data-wid="${w.id}" data-t="${recC.type}"${recC.intervals ? ' data-style="intervals"' : ''}>Log it</button>`}
     </div>
     ${rd && rd.ready ? `<div class="coach coach-up" style="margin-top:12px"><span>▲ Your beginner classes have felt easy for a while. You might be ready for intermediate.</span><button data-a="yoga-level" data-v="intermediate">Switch</button></div>` : ''}
@@ -1338,7 +1416,7 @@ function yogaCard(w, a, k) {
     <label class="lbl">Length</label>${actSeg(w, k, a, 'min', [[30, '30 min'], [60, '1 hour']])}
     <label class="lbl">How did it feel?</label>${actSeg(w, k, a, 'feel', [['easy', 'Easy'], ['right', 'Just right'], ['hard', 'Hard']])}
     <label class="lbl">Notes</label>
-    <input class="inp" data-wid="${w.id}" data-wb="activities.${k}.notes" value="${esc(a.notes)}" placeholder="Anything tight, sore, or that felt great">
+    <input class="inp" data-wid="${w.id}" data-wb="activities.${k}.notes" value="${esc(a.notes)}" placeholder="Tight, sore, or great?">
     <div class="act-stats" id="act-stats-${k}">${actStatsText(a, w.date)}</div>
   </div>`;
 }
@@ -1427,7 +1505,9 @@ function viewHistory() {
         <span class="val">${x.iso && x.bestSet ? `${fmtW(x.bestSet.w)}×${x.bestSet.r}` : x.best ? `${x.best}` : ''}</span>${ic('chev')}</button>`).join('')}</div>
       <div class="foot">On the right: your best estimated 1-rep max (lb) for big lifts, and your best set for small lifts, where a 1-rep max doesn't mean much.</div>`;
   }
-  return `<header class="top"><h1>History</h1></header>${seg}${list}`;
+  return `<header class="top"><h1>History</h1></header>
+    <button class="btn block" data-a="past-open" style="margin-bottom:12px">+ Log a past day</button>
+    ${seg}${list}`;
 }
 
 // A 1-rep max from 15-rep raises means little: skip it for isolation lifts and 12+ rep work.
@@ -1503,12 +1583,12 @@ function viewWorkout() {
   if (!w) { S.view = null; return viewHistory(); }
   return `<button class="backbtn" data-a="back">${ic('back')} History</button>
     <header class="top">
-      <div class="eyebrow">${isDayKey(w.dayKey) ? `${esc(DAY_NAMES[w.dayKey])}'s session` : 'Custom workout'}</div>
+      <div class="eyebrow">${w.type === 'rest' ? 'Activity day' : isDayKey(w.dayKey) ? `${esc(DAY_NAMES[w.dayKey])}'s session` : 'Custom workout'}</div>
       <h1>${esc(fmtDate(w.date, { weekday: 'long', month: 'short', day: 'numeric' }))}<span class="sub">${esc(w.label)}</span></h1>
     </header>
-    <div class="card"><label class="lbl">Date</label><input class="inp" type="date" data-wid="${w.id}" data-wb="date" value="${w.date}" max="${todayStr()}"></div>
     ${w.type === 'strength' ? sessionStrength(w) : w.type === 'cardio' ? sessionCardio(w) : sessionRest(w)}
-    <button class="btn danger block" style="margin-top:24px" data-a="del-w" data-id="${w.id}">Delete this workout</button>`;
+    <div class="card" style="margin-top:24px"><label class="lbl">Wrong day? Change the date</label><input class="inp" type="date" data-wid="${w.id}" data-wb="date" value="${w.date}" max="${todayStr()}"></div>
+    <button class="btn danger block" style="margin-top:12px" data-a="del-w" data-id="${w.id}">Delete this workout</button>`;
 }
 
 // ----- Body -----
@@ -1632,26 +1712,15 @@ function viewBody() {
     </div>
 
     <div class="card">
-      <label class="lbl" for="steps-inp">Steps</label>
-      <input class="inp" id="steps-inp" inputmode="numeric" value="${b.steps ?? ''}" placeholder="From your Health app">
-      <div class="prog ${(b.steps || 0) >= S.settings.stepGoal ? 'hit' : ''}" style="margin-top:10px"><div style="width:${Math.min(100, (b.steps || 0) / S.settings.stepGoal * 100)}%"></div></div>
-      <div class="sh-hint">Goal ${S.settings.stepGoal.toLocaleString()} a day. Open the Health app, tap Steps, and copy today's number. Daily steps are one of the biggest helps for staying lean.</div>
-    </div>
-
-    <div class="card">
       <label class="lbl">Protein</label>
       <div class="big-num">${b.protein}<small> / ${target} g</small></div>
       <div class="prog ${b.protein >= target ? 'hit' : ''}"><div style="width:${pct}%"></div></div>
       <div class="muted small" style="margin-top:-6px">${left > 0 ? `${left} g to go` : 'Target hit. Nice.'}</div>
       <div class="sh-hint">Target: ${why}</div>
-      ${S.settings.creatine ? `<div class="rem-row" style="margin-top:12px">
-        <div><b>Creatine, 3 to 5 g</b><small>${creatineDays} of the last 7 days. Any time of day works; daily is what matters.</small></div>
-        <button class="toggle ${b.creatine ? 'on' : ''}" data-a="creatine">${b.creatine ? 'Took it' : 'Not yet'}</button>
-      </div>` : ''}
     </div>
 
-    <div class="card">
-      <label class="lbl" for="food-name">Add what you ate</label>
+    <div class="card" id="food-card">
+      <label class="lbl" for="food-name">Add what you ate <span class="muted">· ${b.protein} / ${target} g</span></label>
       <div class="food-form">
         <input class="inp" id="food-name" placeholder="e.g. 3 eggs" autocomplete="off">
         <input class="inp" id="food-g" inputmode="numeric" placeholder="g">
@@ -1661,6 +1730,17 @@ function viewBody() {
       ${recent.length ? `<label class="lbl">Recent</label>${recent.map(foodBtn).join('')}<div class="sh-hint">Tap ☆ to keep one as a favorite.</div>` : ''}
       <label class="lbl">Quick add</label>
       <div class="quick">${[10, 20, 25, 30, 40, 50].map(n => `<button data-a="p-add" data-n="${n}">+${n}</button>`).join('')}</div>
+    </div>
+
+    <div class="card">
+      <label class="lbl" for="steps-inp">Steps</label>
+      <input class="inp" id="steps-inp" inputmode="numeric" value="${b.steps ?? ''}" placeholder="From your Health app">
+      <div class="prog ${(b.steps || 0) >= S.settings.stepGoal ? 'hit' : ''}" style="margin-top:10px"><div style="width:${Math.min(100, (b.steps || 0) / S.settings.stepGoal * 100)}%"></div></div>
+      <div class="sh-hint">Goal ${S.settings.stepGoal.toLocaleString()} a day. Open the Health app, tap Steps, and copy today's number. Daily steps are one of the biggest helps for staying lean.</div>
+      ${S.settings.creatine ? `<div class="rem-row" style="margin-top:12px">
+        <div><b>Creatine, 3 to 5 g</b><small>${creatineDays} of the last 7 days. Any time of day works; daily is what matters.</small></div>
+        <button class="toggle ${b.creatine ? 'on' : ''}" data-a="creatine">${b.creatine ? 'Took it' : 'Not yet'}</button>
+      </div>` : ''}
     </div>
 
     ${eaten ? `<h2>Eaten ${date === today ? 'today' : 'this day'}</h2><div class="card flush">${eaten}</div>` : ''}
@@ -1856,7 +1936,7 @@ function volumeCard(ws) {
       ${v.map(x => `<div class="vol-row">
         <span>${x.name}</span>
         <div class="vol-bar"><i class="plan" style="width:${x.planned / max * 100}%"></i><i class="done" style="width:${Math.min(x.done, x.planned || x.done) / max * 100}%"></i><b style="left:${x.goal / max * 100}%"></b></div>
-        <span class="vol-n ${x.planned < x.goal ? 'low' : ''}">${round1(x.done)}/${round1(x.planned)}</span>
+        <span class="vol-n ${x.planned < x.goal ? 'low' : ''}">${Math.round(x.done)}/${Math.round(x.planned)}</span>
       </div>`).join('')}
       <div class="sh-hint">Done this week out of planned. The tick marks the goal: 10 sets a week for big muscles, 6 for smaller ones.${low.length ? ` Under it in your program: ${low.map(x => x.name.toLowerCase()).join(', ')}. Add a set to a lift that works it in More → Program.` : ''} Big helpers count as half a set (a bench set is ½ triceps).</div>
     </div>`;
@@ -1903,15 +1983,15 @@ function viewMore() {
   const lb = S.settings.lastBackup;
   return `<header class="top"><h1>More</h1></header>
     ${standalone ? '' : `<div class="card tip"><b>Install it:</b> in Safari, tap Share → Add to Home Screen, then always open Lift Log from that icon. The icon and Safari keep separate data on iPhone.</div>`}
-    ${profileCard()}
-    ${goalCard()}
     <h2>Program</h2>
     <div class="card flush">${days}</div>
     <h2>Your other workouts</h2>
     ${S.program.custom.length ? `<div class="card flush">${S.program.custom.map(c => `<button class="row" data-a="prog-open" data-d="${c.id}">
       <div><b>${esc(c.label)}</b><small>${plural(sum((c.groups || []).map(g => g.length)), 'exercise')}</small></div>${ic('chev')}</button>`).join('')}</div>` : ''}
     <button class="btn block" data-a="plan-new">+ New workout</button>
-    <div class="sh-hint">Extra lifting workouts you can do any day: pick "Other" on Today.</div>
+    <div class="sh-hint">Extra lifting workouts you can do any day: tap "Different workout" on Today.</div>
+    ${profileCard()}
+    ${goalCard()}
 
     <h2>Rest timer</h2>
     <div class="card">
@@ -1928,6 +2008,10 @@ function viewMore() {
         <div><b>Smart rest</b><small>Big lifts like presses, rows, and squats get ${fmtClock(Math.max(S.settings.restSec, 150))} (${fmtClock(Math.max(S.settings.restSec, 180))} at 8 reps or fewer). Smaller lifts like curls and raises use the time above.</small></div>
         <button class="toggle ${S.settings.smartRest ? 'on' : ''}" data-a="smart-rest">${S.settings.smartRest ? 'On' : 'Off'}</button>
       </div>
+      <div class="rem-row" style="margin-top:14px">
+        <div><b>Ask how hard it was</b><small>After the last set of each lift: how many more reps you had in you. Easy sets earn bigger jumps.</small></div>
+        <button class="toggle ${S.settings.askRir !== false ? 'on' : ''}" data-a="ask-rir">${S.settings.askRir !== false ? 'On' : 'Off'}</button>
+      </div>
       <div class="sh-hint">Starts by itself after each set (after each round in a superset). iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
     </div>
 
@@ -1936,7 +2020,7 @@ function viewMore() {
 
     <h2>Backup</h2>
     <div class="card">
-      <button class="btn pri block" data-a="export">Export backup (JSON)</button>
+      <button class="btn pri block" data-a="export">Save a backup</button>
       <button class="btn block" data-a="import">Import backup</button>
       <div class="sh-hint">${lb ? `Last export: ${esc(new Date(lb).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }))}.` : 'No export yet.'} Everything lives only on this phone, so export now and then and save the file to iCloud Drive or Files.</div>
       <div class="sh-hint">${S.persisted === true ? 'Storage is marked as protected on this device.' : S.persisted === false ? 'Storage is not marked as protected yet. Installing to the Home Screen helps.' : ''}</div>
@@ -2112,7 +2196,23 @@ function renderSheet() {
   if (!S.sheet) { el.hidden = true; document.body.classList.remove('sheet-open'); return; }
   el.hidden = false;
   document.body.classList.add('sheet-open');
-  $('#sheet-panel').innerHTML = ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML })[S.sheet.kind]();
+  $('#sheet-panel').innerHTML = ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, past: pastSheetHTML })[S.sheet.kind]();
+}
+
+function pastSheetHTML() {
+  const opt = (k, name, sub) => `<button class="row" data-a="past-make" data-k="${k}"><div><b>${esc(name)}</b><small>${esc(sub)}</small></div>${ic('chev')}</button>`;
+  return `<div class="sh-grip"></div>
+    <div class="sh-title">Log a past day<span>Pick the day, then what you did</span></div>
+    <label class="lbl" for="past-date">Date</label>
+    <input class="inp" type="date" id="past-date" value="${S.sheet.date}" max="${todayStr()}">
+    <label class="lbl">What you did</label>
+    <div class="card flush">
+      ${DAYS.filter(d => S.program.days[d].type !== 'rest').map(d => opt(d, `${DAY_NAMES[d]}'s session`, S.program.days[d].label)).join('')}
+      ${S.program.custom.map(c => opt(c.id, c.label, 'Saved workout')).join('')}
+      ${opt('free', 'Blank workout', 'Add exercises yourself')}
+      ${opt('sun', 'Just an activity', 'A hike, a climb, a walk, anything')}
+    </div>
+    <div class="sheet-actions"><button class="btn ghost block" data-a="sheet-close">Cancel</button></div>`;
 }
 
 function setSheetHTML() {
@@ -2142,7 +2242,7 @@ function setSheetHTML() {
     </div>
     <div class="sheet-actions">
       <button class="btn pri block big" data-a="ss-save">${s.done ? 'Save changes' : 'Log set'}</button>
-      ${s.done ? '' : '<button class="btn block" data-a="ss-only">Save without logging</button>'}
+      ${s.done ? '' : '<button class="btn block" data-a="ss-only">Save, don\'t check off</button>'}
       <button class="btn ghost block" data-a="sheet-close">Cancel</button>
     </div>`;
 }
@@ -2162,13 +2262,20 @@ function exSheetHTML() {
   const segBtn = (f, v, n) => `<button class="${String(x[f]) === String(v) ? 'on' : ''}" data-a="sf-set" data-f="${f}" data-v="${v}">${n}</button>`;
   const hi = num(x.max) ?? num(x.min);
   const title = sess ? (sh.i == null ? 'Add an exercise' : 'Change this exercise') : (sh.g == null ? 'New exercise' : 'Edit exercise');
-  const picks = sess || sh.g == null ? knownExercises(new Set(sess ? w.exercises.map(e => e.key) : [])).slice(0, 16) : [];
   const ex = sess && sh.i != null ? w.exercises[sh.i] : null;
+  let picks = sess || sh.g == null ? knownExercises(new Set(sess ? w.exercises.map(e => e.key) : [])) : [];
+  if (ex) {
+    // Swaps that work the same muscles come first.
+    const mine = musclesOf(ex.name), score = n => sum(Object.entries(musclesOf(n)).map(([m, f]) => Math.min(f, mine[m] || 0)));
+    picks = picks.map(p => ({ p, sc: score(p.name) })).sort((a, b) => b.sc - a.sc).map(x => x.p);
+  }
+  picks = picks.slice(0, ex ? 8 : 16);
   const sample = ex ? (+(ex.sets.find(s => s.w !== '') || {}).w || 0) : 0;
   return `<div class="sh-grip"></div>
     <div class="sh-title">${title}${sess ? `<span>${sh.i == null ? 'Just for today, unless you save it below' : 'Swap it, or change today\'s sets and reps'}</span>` : ''}</div>
-    ${picks.length ? `<label class="lbl">${sh.i == null ? 'Pick one you know' : 'Swap for'}</label>
-      <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="sf-pick" data-n="${esc(p.name)}">${esc(p.name)}</button>`).join('')}</div>` : ''}
+    ${picks.length ? `<label class="lbl">${sh.i == null ? 'Pick one you know' : 'Swap for (one tap)'}</label>
+      <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="${ex ? 'sx-swap' : 'sf-pick'}" data-n="${esc(p.name)}">${esc(p.name)}</button>`).join('')}</div>` : ''}
+    ${ex ? '<button class="btn danger block" style="margin-top:12px" data-a="sx-rm">Remove from today</button><label class="lbl" style="margin-top:20px">Or change it</label>' : ''}
     <label class="lbl">Name</label>
     <input class="inp" data-sf="name" value="${esc(x.name)}" placeholder="e.g. Goblet squat">
     <label class="lbl">Sets</label>
@@ -2183,6 +2290,7 @@ function exSheetHTML() {
       <input class="inp" inputmode="numeric" data-sf="max" value="${esc(x.max)}" placeholder="High">
     </div>
     <div class="sh-hint">Use the same number twice for a fixed target (like 3 × 8). Leave both blank for max reps: you'll build total reps, then add weight.</div>
+    <details class="more-opts"><summary>More options</summary>
     <label class="lbl">Count</label>
     <div class="seg">${segBtn('unit', 'reps', 'Reps')}${segBtn('unit', 'steps', 'Steps')}</div>
     <label class="lbl">Type</label>
@@ -2194,6 +2302,7 @@ function exSheetHTML() {
     <div class="sh-hint">When you hit ${hi != null ? `${hi} on every set` : 'your rep goal'}, the weight goes up about ${x.kind !== 'iso' && x.body === 'upper' ? '4' : '5'}%, rounded to this step${sample ? ` (${sample} → ${round2(sample + jumpFor(x, sample))} lb)` : ''}.</div>
     <label class="lbl">Note</label>
     <input class="inp" data-sf="note" value="${esc(x.note)}" placeholder="e.g. per leg, feet high">
+    </details>
     ${sess && plan ? `<div class="rem-row" style="margin-top:16px">
       <div><b>Save to ${isDayKey(w.dayKey) ? `${DAY_NAMES[w.dayKey]}'s` : 'this'} workout too</b><small>So it's there next time.</small></div>
       <button class="toggle ${sh.toPlan ? 'on' : ''}" data-a="sf-toplan">${sh.toPlan ? 'On' : 'Off'}</button>
@@ -2201,7 +2310,6 @@ function exSheetHTML() {
     <div class="sheet-actions">
       <button class="btn pri block big" data-a="sf-save">${sess && sh.i == null ? 'Add' : 'Save'}</button>
       ${!sess && sh.g != null ? '<button class="btn danger block" data-a="sf-del">Delete exercise</button>' : ''}
-      ${sess && sh.i != null ? '<button class="btn danger block" data-a="sx-rm">Remove from today</button>' : ''}
       <button class="btn ghost block" data-a="sheet-close">Cancel</button>
     </div>`;
 }
@@ -2399,6 +2507,15 @@ function saveSessExercise() {
     toast(`Added ${item.name}${sh.toPlan && plan ? ' here and for next time' : ' for today'}`);
   } else {
     const e = w.exercises[sh.i], t = targetOf(e);
+    if (keyOf(item.name) !== e.key && e.sets.some(s => s.done)) {
+      // Sets already logged stay with the old exercise; the new one goes right after it.
+      e.sets = e.sets.filter(s => s.done);
+      const g = Math.max(...w.exercises.map(x => x.group)) + 1;
+      w.exercises.splice(sh.i + 1, 0, sessionExercise({ ...item, id: null }, g, w));
+      persist(w); closeSheet(); render();
+      toast(`Kept your ${e.name} sets. ${item.name} is next.`);
+      return;
+    }
     const changed = keyOf(item.name) !== e.key || ['sets', 'min', 'max', 'inc', 'kind', 'body', 'unit'].some(f => item[f] !== t[f]);
     e.name = item.name; e.key = keyOf(item.name);
     e.target = { sets: item.sets, min: item.min, max: item.max, inc: item.inc, kind: item.kind, body: item.body, stepSet: true, unit: item.unit, note: item.note };
@@ -2458,15 +2575,17 @@ const ACT = {
   'sx-add': d => openSessExSheet(getW(d.wid), null),
   'sx-rm': () => {
     const w = getW(S.sheet.wid), e = w.exercises[S.sheet.i];
-    if (e.sets.some(x => x.done) && !confirm('Remove it, including the sets you logged today?')) return;
-    w.exercises.splice(S.sheet.i, 1);
-    persist(w); closeSheet(); render(); toast(`Removed ${e.name} for today`);
+    const at = S.sheet.i;
+    w.exercises.splice(at, 1);
+    persist(w); closeSheet(); render();
+    toastUndo(`Removed ${e.name} for today`, () => { w.exercises.splice(at, 0, e); persist(w); render(); });
   },
   'sf-pick': d => {
     const known = knownExercises(new Set()).find(x => keyOf(x.name) === keyOf(d.n));
     S.sheet.data = known && known.sets ? exData(classify({ ...known })) : { ...S.sheet.data, name: d.n };
     renderSheet();
   },
+  'sx-swap': d => { ACT['sf-pick'](d); saveSessExercise(); },
   'sf-toplan': () => { S.sheet.toPlan = !S.sheet.toPlan; renderSheet(); },
   'act-pick': d => { S.sheet = { kind: 'act', wid: d.wid }; renderSheet(); },
   'act-add': d => {
@@ -2512,10 +2631,12 @@ const ACT = {
   'ex-chart': d => { S.view = { name: 'exercise', key: d.key, back: S.view }; render(); scrollTo(0, 0); },
   finish: d => {
     const w = getW(d.wid);
+    const left = sum((w.exercises || []).map(e => e.sets.filter(s => !s.done).length));
+    if (!w.finishedAt && w.type === 'strength' && left && !confirm(`${left} set${left === 1 ? '' : 's'} not checked off. Finish anyway?`)) return;
     w.finishedAt = Date.now();
     flushSaves(); persist(w); stopTimer(); render();
     const recs = newRecords(w);
-    if (recs.length) { haptic(); toast(`New record: ${recs.join(' and ')}!`); } else toast(w.type === 'strength' ? 'Workout saved. Nice work.' : 'Session saved.');
+    if (recs.length) { haptic(); toast(`New record: ${recs.join(' and ')}!`); } else toast(w.type === 'strength' ? `Saved: ${sum((w.exercises || []).map(e => doneSets(e).length))} sets, about ${liftMinutes(w)} min. Nice work.` : 'Session saved.');
   },
   'add-act': d => {
     const w = getW(d.wid);
@@ -2543,7 +2664,7 @@ const ACT = {
     const el = d && d.f && document.getElementById(d.f);
     if (el) { el.scrollIntoView({ block: 'center' }); el.focus(); }
   },
-  'go-goal': () => { ACT.tab({ t: 'more' }); const el = document.getElementById('goal-card'); if (el) el.scrollIntoView({ block: 'start' }); },
+  'go-goal': () => { S.settings.welcomed = true; saveSettings(); ACT.tab({ t: 'more' }); const el = document.getElementById('goal-card'); if (el) el.scrollIntoView({ block: 'start' }); },
   goal: d => { S.settings.goal = d.v; saveSettings(); render(); toast(`Goal: ${GOALS[d.v].name}`); },
   'creatine-track': () => { S.settings.creatine = !S.settings.creatine; saveSettings(); render(); },
   'step-goal': d => { S.settings.stepGoal = Math.max(2000, Math.min(30000, S.settings.stepGoal + +d.d)); saveSettings(); render(); },
@@ -2551,10 +2672,11 @@ const ACT = {
   rir: d => {
     const w = getW(d.wid), e = w.exercises[+d.ex], s = e.sets[+d.s];
     s.rir = s.rir === +d.v ? null : +d.v;
-    const tip = s.rir != null ? rirAdjust(w, e, +d.s) : '';
-    S.rirAsk = null;
-    persist(w); render();
-    if (tip) toast(tip);
+    // The finished exercise folds up; keep the next one where your thumb is.
+    const k = w.exercises.findIndex((x, n) => n > +d.ex && x.sets.some(y => !y.done));
+    const sel = k >= 0 ? setSel(w, k, w.exercises[k].sets.findIndex(y => !y.done)) : null;
+    persist(w);
+    if (sel) { keepInPlace(sel, render); showAboveTimer(sel); } else render();
   },
   'deload-start': () => {
     const t = todayStr();
@@ -2586,7 +2708,25 @@ const ACT = {
   },
   'set-height': d => { const p = S.settings.profile; p.heightIn = Math.max(48, Math.min(96, p.heightIn + +d.d)); saveSettings(); render(); },
   'smart-rest': () => { S.settings.smartRest = !S.settings.smartRest; saveSettings(); render(); },
-  'rm-act': d => { const w = getW(d.wid); w.activities.splice(+d.i, 1); persist(w); render(); },
+  'rm-act': d => {
+    const w = getW(d.wid), [a] = w.activities.splice(+d.i, 1);
+    persist(w); render();
+    toastUndo(`Removed ${a.type === 'other' ? a.name || 'activity' : (ACT_TYPES[a.type] || 'activity')}`, () => { w.activities.splice(+d.i, 0, a); persist(w); render(); });
+  },
+  'checkin-open': () => { S.checkinOpen = true; render(); },
+  'ex-unfold': d => { S.unfold = { ...(S.unfold || {}), [`${d.wid}:${d.ex}`]: true }; render(); },
+  'past-open': () => { S.sheet = { kind: 'past', date: addDays(todayStr(), -1) }; renderSheet(); },
+  'past-make': d => {
+    const date = ($('#past-date') || {}).value || S.sheet.date;
+    if (date > todayStr()) { toast('Pick today or an earlier day.'); return; }
+    const w = buildSession(d.k, date);
+    w.finishedAt = Date.now();
+    persist(w); closeSheet();
+    S.tab = 'history'; S.view = { name: 'workout', id: w.id, back: null };
+    render(); scrollTo(0, 0);
+  },
+  'ask-rir': () => { S.settings.askRir = S.settings.askRir === false; saveSettings(); render(); },
+  'welcome-done': () => { S.settings.welcomed = true; saveSettings(); render(); },
   'open-w': d => { S.view = { name: 'workout', id: d.id, back: S.view }; render(); scrollTo(0, 0); },
   'del-w': d => {
     if (!confirm('Delete this workout? This can\'t be undone.')) return;
@@ -2687,9 +2827,9 @@ const ACT = {
   'food-quick': d => { const f = findFood(d.n); if (f) { addFood(f.name, f.g); toast(`Added ${f.name}`); } },
   'food-fav': d => { const f = findFood(d.n); if (f) { f.fav = !f.fav; saveFoods(); render(); } },
   'item-rm': d => {
-    const b = bodyEntry(S.bodyDate);
-    b.items.splice(+d.i, 1);
+    const b = bodyEntry(S.bodyDate), [it] = b.items.splice(+d.i, 1);
     saveBody(b); render();
+    toastUndo(`Removed ${it.name || `${it.g} g`}`, () => { b.items.splice(+d.i, 0, it); saveBody(b); render(); });
   },
 
   'set-rest': d => { S.settings.restSec = Math.max(15, Math.min(600, S.settings.restSec + +d.d)); saveSettings(); render(); },
@@ -2812,5 +2952,12 @@ document.addEventListener('visibilitychange', () => {
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // A new version takes over in the background; offer a reload so it shows right away.
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (had) toastUndo('Lift Log was updated.', () => { flushSaves(); location.reload(); }, 'Reload', 12000);
+    });
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  }
 })();
