@@ -12,7 +12,6 @@
 const ALLOWED_ORIGINS = ['https://adewyn.github.io', 'http://localhost:8790'];
 const PUSH_HOSTS = [/(^|\.)push\.apple\.com$/, /^fcm\.googleapis\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /\.notify\.windows\.com$/];
 const MAX_SUBS = 50;
-const MAX_STEP_CODES = 50;
 const STEP_PATH = /^steps\/(s_[a-z0-9]{16,40})$/;
 
 export default {
@@ -81,7 +80,8 @@ export default {
 
   async scheduled(event, env) {
     const subs = await loadSubs(env);
-    let changed = false;
+    // Collect what changed, then apply it to a fresh copy, so a weigh-in that lands meanwhile isn't lost.
+    const sent = {}, gone = [];
     for (const [id, s] of Object.entries(subs)) {
       const { date, minutes } = localNow(s.tz);
       // Due in the first hour after the chosen time.
@@ -90,19 +90,25 @@ export default {
       if (s.weighOn !== false && due(s.time) && s.lastSent !== date && s.weighed !== date) field = 'lastSent';
       else if (s.streakOn && due(s.streakTime || '14:00') && s.lastStreak !== date && s.active !== date) field = 'lastStreak';
       if (!field) continue;
-      const res = await sendPush(env, s.endpoint);
-      if (res.gone) delete subs[id];
-      else if (res.ok) s[field] = date;
-      changed = true;
+      try {
+        const res = await sendPush(env, s.endpoint);
+        if (res.gone) gone.push(id);
+        else if (res.ok) sent[id] = { [field]: date };
+      } catch { /* try again next run */ }
     }
-    if (changed) await saveSubs(env, subs);
+    if (!gone.length && !Object.keys(sent).length) return;
+    const fresh = await loadSubs(env);
+    gone.forEach(id => { delete fresh[id]; });
+    Object.entries(sent).forEach(([id, f]) => { if (fresh[id]) Object.assign(fresh[id], f); });
+    await saveSubs(env, fresh);
   },
 };
 
 // GET returns what's been posted; POST adds today's count (JSON, a form field, or plain text).
 async function steps(req, env, code, reply) {
-  const all = (await env.SUBS.get('steps', 'json')) || {};
-  if (req.method === 'GET') return reply({ ok: true, steps: all[code] || [] });
+  const key = `steps:${code}`;
+  const list = (await env.SUBS.get(key, 'json')) || [];
+  if (req.method === 'GET') return reply({ ok: true, steps: list });
   if (req.method !== 'POST') return reply({ error: 'not found' }, 404);
   let n;
   const type = req.headers.get('content-type') || '';
@@ -113,9 +119,7 @@ async function steps(req, env, code, reply) {
   } catch { return reply({ error: 'bad request' }, 400); }
   n = Math.round(parseFloat(String(n ?? '').replace(/,/g, '')));
   if (!(n >= 0 && n <= 200000)) return reply({ error: 'steps should be a number' }, 400);
-  if (!all[code] && Object.keys(all).length >= MAX_STEP_CODES) return reply({ error: 'server is full' }, 503);
-  all[code] = [...(all[code] || []), { at: Date.now(), n }].slice(-60);
-  await env.SUBS.put('steps', JSON.stringify(all));
+  await env.SUBS.put(key, JSON.stringify([...list, { at: Date.now(), n }].slice(-60)));
   return reply({ ok: true, steps: n });
 }
 

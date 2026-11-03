@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v13';
+const CACHE = 'liftlog-v14';
 const ASSETS = [
   './',
   './index.html',
@@ -13,7 +13,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // Skip the browser's own cache so a new version never stores old files.
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -27,7 +28,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin || req.cache === 'no-store') return;
-  const fresh = fetch(req).then(async res => {
+  const fresh = fetch(req, { cache: 'no-cache' }).then(async res => {
     if (res.ok) {
       const c = await caches.open(CACHE);
       await c.put(req, res.clone());
@@ -48,6 +49,22 @@ const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const toMin = t => { const [h, m] = String(t || '00:00').split(':').map(Number); return h * 60 + m; };
 
+// Whether today's body entry has a weight.
+function readBody(date) {
+  return new Promise(res => {
+    const r = indexedDB.open('liftlog');
+    r.onupgradeneeded = () => r.transaction.abort();
+    r.onerror = () => res(false);
+    r.onsuccess = () => {
+      try {
+        const q = r.result.transaction('body', 'readonly').objectStore('body').get(date);
+        q.onsuccess = () => res(!!(q.result && q.result.weight != null));
+        q.onerror = () => res(false);
+      } catch (e) { res(false); }
+    };
+  });
+}
+
 function readKv(keys) {
   return new Promise(res => {
     const out = {};
@@ -67,10 +84,13 @@ function readKv(keys) {
 
 async function reminderText() {
   const kv = await readKv(['settings', 'streak', 'program']);
+  const today0 = ymd(new Date()), weighed = await readBody(today0);
   const r = (kv.settings && kv.settings.reminder) || {};
   const now = new Date(), mins = now.getHours() * 60 + now.getMinutes();
   const today = ymd(now), yesterday = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
-  const streakPush = r.streakOn && (!r.on || Math.abs(mins - toMin(r.streakTime)) < Math.abs(mins - toMin(r.time)));
+  // Pushes carry no data: pick the reminder whose time is closest. Already weighed in today, or a tie,
+  // means it's the streak saver (the server skips the weigh-in reminder once you've weighed in).
+  const streakPush = r.streakOn && (!r.on || weighed || Math.abs(mins - toMin(r.streakTime)) <= Math.abs(mins - toMin(r.time)));
   if (!streakPush) return { title: 'Time to weigh in', body: 'Step on the scale and log it in Lift Log.', url: './#body' };
   const st = kv.streak || {};
   if (st.date === today && st.done) return { title: 'Today already counts 🔥', body: 'Nice work. See you tomorrow.', url: './' };
