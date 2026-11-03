@@ -444,7 +444,7 @@ body.flash::after {
 
 /* ---------- today summary + plans ---------- */
 .today-card { padding: 12px; }
-.day-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.day-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .day-strip button {
   min-height: 58px; padding: 8px 8px; border-radius: 14px; min-width: 0;
   background: var(--s2); text-align: left;
@@ -542,9 +542,14 @@ body.flash::after {
 .back-today { min-height: 44px; padding: 0; font-size: 15px; }
 .day-lbl { margin: 14px 2px 6px; }
 .plan-card .row { padding: 10px 0; min-height: 0; }
-.steps-how { margin: 10px 0 0; padding-left: 22px; }
-.steps-how li { margin-bottom: 10px; line-height: 1.45; color: var(--mut); }
-.steps-how li b { color: var(--tx); }
+.lbl-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.lbl-row .linkbtn { min-height: 0; margin: 0; padding: 6px 2px; font-size: 14px; }
+.time-inp { width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; text-align: left; }
+.time-inp::-webkit-date-and-time-value { text-align: left; }
+.dur { margin-top: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.len-type { margin-top: 8px; }
+.len-type summary { color: var(--mut); font-size: 14px; cursor: pointer; padding: 6px 0; }
+.len-type .grid2 { margin-top: 6px; }
 
 /* v2.0: visual pass. Rounded numerals, soft depth, a lime glow up top, clearer pressed states. */
 body::before {

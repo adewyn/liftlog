@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.0.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -10,7 +10,7 @@ const COACH_MARK = { up: '▲', down: '▼', reps: '↗', hold: '→', beat: '�
 const DEFAULT_SETTINGS = {
   restSec: 90, smartRest: true, sound: true, lastBackup: null,
   profile: { heightIn: 75 }, yogaLevel: 'beginner',
-  goal: 'maintain', creatine: true, stepGoal: 8000, deloadUntil: null, deloadLast: null, deloadSnooze: null,
+  goal: 'maintain', creatine: true, deloadUntil: null, deloadLast: null, deloadSnooze: null,
   proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
   reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', id: null },
 };
@@ -881,17 +881,17 @@ function render() {
 }
 
 // ----- daily streak -----
-// A training day counts when you move: any workout or activity, or your step goal. A rest day also
+// A training day counts when you move: any workout or activity. A rest day also
 // counts with a weigh-in or your protein goal. (Days before this rule started keep the old one, where
 // a weigh-in or protein counted any day, so no streak was lost to the change.)
 const isTrainingDay = date => S.program.days[dayKeyOf(date)].type !== 'rest';
 function dayCounts(date) {
   const b = S.body[date] || {};
-  if (S.workouts.some(w => w.date === date && hasWork(w)) || (b.steps || 0) >= S.settings.stepGoal) return true;
+  if (S.workouts.some(w => w.date === date && hasWork(w))) return true;
   if (isTrainingDay(date) && date >= (S.settings.streakRuleFrom || '9999')) return false;
   return b.weight != null || (b.protein || 0) >= proteinTargetFor(date);
 }
-const streakTodo = date => (isTrainingDay(date) ? 'lift, run, walk, do yoga, or hit your step goal' : 'move, weigh in, or hit your protein');
+const streakTodo = date => (isTrainingDay(date) ? 'lift, run, walk, or do yoga' : 'move, weigh in, or hit your protein');
 // Today still keeps the streak alive until midnight, so count back from yesterday if today isn't done yet.
 function dailyStreak() {
   let d = dayCounts(todayStr()) ? todayStr() : addDays(todayStr(), -1);
@@ -955,7 +955,7 @@ const YOGA_MET = { combo: 2.5, flex: 2.3, strength: 2.7 };
 // Everything else you might do, with 2024 Compendium MET values for each effort level.
 // legs/upper say what it works, for tomorrow's picks. dist: 'pace' or 'mph' shows a distance box.
 const ACTIVITIES = [
-  { id: 'hike', name: 'Hike', mets: [3.8, 5.3, 7.5], levels: ['Easy', 'Moderate', 'Hard'], hint: ['Slow and mostly flat', 'Normal pace, some hills', 'Steep climbs or a heavy pack'], dist: 'pace', legs: true, steps: true },
+  { id: 'hike', name: 'Hike', mets: [3.8, 5.3, 7.5], levels: ['Easy', 'Moderate', 'Hard'], hint: ['Slow and mostly flat', 'Normal pace, some hills', 'Steep climbs or a heavy pack'], dist: 'pace', legs: true },
   { id: 'climb', name: 'Rock climbing', mets: [5.8, 7.3, 8.0], levels: ['Easy', 'Moderate', 'Hard'], hint: ['Easy routes, lots of rest', 'Steady climbing', 'Hard routes, little rest'], upper: true },
   { id: 'boulder', name: 'Bouldering', mets: [5.8, 7.3, 8.8], levels: ['Easy', 'Moderate', 'Hard'], hint: ['Easy problems, lots of rest', 'Steady session', 'Hard problems, short rests'], upper: true },
   { id: 'bike', name: 'Bike ride', mets: [4.0, 8.0, 10.0], levels: ['Easy', 'Moderate', 'Hard'], hint: ['Cruising, under 10 mph', 'About 12 to 14 mph', '14 mph or faster'], dist: 'mph', legs: true },
@@ -1007,6 +1007,24 @@ const fmtDur = m => (m >= 60 ? `${Math.floor(m / 60)} hr${m % 60 ? ` ${Math.roun
 const energyFor = date => (S.body[date] || {}).energy || null;
 const kgFor = date => { const b = latestWeighIn(date); return b ? b.weight * 0.4536 : null; };
 const actMinutes = a => (+a.hr || 0) * 60 + (+a.min || 0) + (+a.sec || 0) / 60;
+// Walks and runs take a start and finish time; the length comes from the two (past midnight works too).
+const clockMin = t => (/^\d{1,2}:\d{2}/.test(t || '') ? +t.slice(0, t.indexOf(':')) * 60 + +t.slice(t.indexOf(':') + 1, t.indexOf(':') + 3) : null);
+function actFromTimes(a) {
+  const s0 = clockMin(a.start), e0 = clockMin(a.end);
+  if (s0 == null || e0 == null) return false;
+  const len = (e0 - s0 + 1440) % 1440;
+  if (!len) return false;
+  a.hr = ''; a.min = len; a.sec = 0;
+  return true;
+}
+const nowClock = () => { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const fmtLen = m => (m >= 60 ? `${Math.floor(m / 60)} hr ${Math.round(m % 60)} min` : `${Math.round(m)} min`);
+const durText = a => {
+  const s0 = clockMin(a.start), e0 = clockMin(a.end), m = actMinutes(a);
+  if (s0 != null && e0 != null && s0 === e0) return 'Start and finish are the same minute.';
+  if (!m) return 'Add a start and finish time.';
+  return `Length: ${fmtLen(m)}${clockMin(a.start) == null || clockMin(a.end) == null ? ' (typed in)' : ''}`;
+};
 const paceOf = a => (+a.dist > 0 && actMinutes(a) > 0) ? actMinutes(a) / +a.dist : null;
 const fmtPace = m => { const sec = Math.round(m * 60); return `${Math.floor(sec / 60)}:${pad(sec % 60)}`; };
 
@@ -1034,19 +1052,6 @@ function actKcal(a, date) {
 }
 // How big a day it was: active MET-hours. 8 or more (a 2-hour hike, a long run) counts as a hard day.
 const actLoad = a => Math.max(0, actMet(a) - 1) * actMinutes(a) / 60;
-// Steps from your height. Walking steps are about 41.5% of it. Running steps grow with speed, so they
-// come from your speed and a cadence that rises with pace and drops a little for taller runners.
-function actSteps(a) {
-  const walkish = a.type === 'walk' || (a.type === 'other' && actDef(a).steps);
-  if (!(+a.dist > 0) || !(walkish || a.type === 'run')) return null;
-  const hIn = S.settings.profile.heightIn;
-  if (walkish) return Math.round(+a.dist * 63360 / (hIn * 0.415) / 10) * 10;
-  const min = actMinutes(a);
-  if (!min) return null;
-  const kmh = +a.dist * 1.60934 / (min / 60);
-  const cadence = Math.max(150, Math.min(195, 165 + 3.5 * (kmh - 10) - 2 * (hIn * 2.54 - 175) / 5));
-  return Math.round(cadence * min / 10) * 10;
-}
 // Lifting time from when sets were logged, or about 2.5 minutes a set when that's missing.
 function liftMinutes(w) {
   const n = sum((w.exercises || []).map(e => doneSets(e).length));
@@ -1078,8 +1083,6 @@ function actStatsText(a, date) {
   else if (p) bits.push(`Pace ${fmtPace(p)} /mi`);
   const k = actKcal(a, date);
   if (k) bits.push(`~${k} active cal`);
-  const st = actSteps(a);
-  if (st) bits.push(`~${st.toLocaleString()} steps`);
   if (!kgFor(date) && actMinutes(a)) bits.push('log your weight to see calories');
   return bits.join(' · ');
 }
@@ -1293,7 +1296,6 @@ function todaySummary(date, w) {
     <div class="day-strip">
       <button class="${b.weight != null ? 'ok' : ''}" data-a="go-body"><span>Weigh-in</span><b>${b.weight != null ? b.weight : 'Not yet'}</b></button>
       <button class="${b.protein >= 0.9 * target ? 'ok' : ''}" data-a="go-body" data-f="food-name"><span>Protein</span><b>${b.protein}/${target}</b></button>
-      <button class="${(b.steps || 0) >= S.settings.stepGoal ? 'ok' : ''}" data-a="go-body" data-f="steps-inp"><span>Steps</span><b>${b.steps ? fmtK(b.steps) : '—'}</b></button>
       <button class="${hasWork(w) ? 'ok' : ''}" data-a="scroll-work"><span>${w.type === 'strength' && w.exercises.length ? 'Sets' : w.type === 'rest' ? 'Today' : 'Workout'}</span><b>${status}</b></button>
     </div>
     ${en && sleepFor(date) != null && !S.checkinOpen ? `<button class="checkin-sum" data-a="checkin-open"><span>Energy <b>${ENERGY[en]}</b> · Sleep <b>${sleepPick(sleepFor(date))[1]} hrs</b></span><span class="linkbtn">Change</span></button>` : `
@@ -1617,10 +1619,18 @@ function moveCard(w, a, k, rec) {
     <label class="lbl">Distance (miles)</label>
     <input class="inp" inputmode="decimal" data-wid="${w.id}" data-wb="activities.${k}.dist" value="${esc(a.dist)}" placeholder="${sug ? sug.dist : '0.0'}">
     <div class="grid2" style="margin-top:12px">
-      <div><label class="lbl">Minutes</label><input class="inp" inputmode="numeric" data-wid="${w.id}" data-wb="activities.${k}.min" value="${esc(a.min)}" placeholder="0"></div>
-      <div><label class="lbl">Seconds</label><input class="inp" inputmode="numeric" data-wid="${w.id}" data-wb="activities.${k}.sec" value="${esc(a.sec)}" placeholder="0"></div>
+      ${[['start', 'Start'], ['end', 'Finish']].map(([f, n]) => `<div><div class="lbl-row"><label class="lbl">${n}</label>
+        <button class="linkbtn" data-a="act-now" data-wid="${w.id}" data-i="${k}" data-f="${f}">Now</button></div>
+        <input class="inp time-inp" type="time" data-wid="${w.id}" data-wb="activities.${k}.${f}" value="${esc(clockMin(a[f]) == null ? '' : a[f])}"></div>`).join('')}
     </div>
-    <div class="act-stats" id="act-stats-${k}">${actStatsText(a, w.date) || 'Enter distance and time to see pace, calories, and steps.'}</div>
+    <div class="dur" id="act-dur-${k}">${durText(a)}</div>
+    <details class="len-type"${clockMin(a.start) == null && actMinutes(a) ? ' open' : ''}><summary>Type the length instead</summary>
+      <div class="grid2">
+        <div><label class="lbl">Minutes</label><input class="inp" inputmode="numeric" id="act-min-${k}" data-wid="${w.id}" data-wb="activities.${k}.min" value="${esc(a.min)}" placeholder="0"></div>
+        <div><label class="lbl">Seconds</label><input class="inp" inputmode="numeric" id="act-sec-${k}" data-wid="${w.id}" data-wb="activities.${k}.sec" value="${esc(a.sec)}" placeholder="0"></div>
+      </div>
+    </details>
+    <div class="act-stats" id="act-stats-${k}">${actStatsText(a, w.date) || 'Enter distance and time to see pace and calories.'}</div>
     ${sug ? `<div class="sh-hint">Suggested today: ${sug.dist} mi at about ${fmtPace(sug.pace)} /mi</div>` : ''}
     <label class="lbl">Notes</label>
     <input class="inp" data-wid="${w.id}" data-wb="activities.${k}.notes" value="${esc(a.notes)}" placeholder="Route, how it felt">
@@ -1829,7 +1839,7 @@ function weightTrend(date) {
 function goalNote(t) {
   const g = GOALS[S.settings.goal] || GOALS.maintain, k = S.settings.goal;
   if (!t || t.pct == null) return `Goal: ${g.name}, ${g.aim}. ${Object.values(S.body).filter(b => b.weight != null).length >= 10 ? 'Weigh in a few more mornings this month and the trend shows here.' : 'Weigh in most mornings and the trend shows after two weeks.'}`;
-  if (t.pct > g.hi) return k === 'cut' ? 'Losing slower than planned. Eat about 200 fewer calories a day, or add steps.'
+  if (t.pct > g.hi) return k === 'cut' ? 'Losing slower than planned. Eat about 200 fewer calories a day, or walk a bit more.'
     : k === 'bulk' ? 'Gaining faster than planned, so more of it may be fat. Eat about 200 fewer calories a day.' : 'Creeping up. Eat about 200 fewer calories a day.';
   if (t.pct < g.lo) return k === 'cut' ? 'Losing fast, which can cost muscle. Eat about 200 more calories a day.'
     : k === 'bulk' ? 'Not gaining yet. Add about 200 calories a day, like a glass of milk or a handful of nuts.' : 'Drifting down. Add about 200 calories a day.';
@@ -1929,16 +1939,10 @@ function viewBody() {
       <div class="quick">${[10, 20, 25, 30, 40, 50].map(n => `<button data-a="p-add" data-n="${n}">+${n}</button>`).join('')}</div>
     </div>
 
-    <div class="card">
-      <label class="lbl" for="steps-inp">Steps</label>
-      <input class="inp" id="steps-inp" inputmode="numeric" value="${b.steps ?? ''}" placeholder="From your Health app">
-      <div class="prog ${(b.steps || 0) >= S.settings.stepGoal ? 'hit' : ''}" style="margin-top:10px"><div style="width:${Math.min(100, (b.steps || 0) / S.settings.stepGoal * 100)}%"></div></div>
-      <div class="sh-hint">Goal ${S.settings.stepGoal.toLocaleString()} a day. ${S.settings.stepsCode ? 'Your Shortcut fills this in from the Health app.' : 'Type it from the Health app, or let a Shortcut fill it in: More → Steps from Health.'} Daily steps are one of the best ways to stay lean.</div>
-      ${S.settings.creatine ? `<div class="rem-row" style="margin-top:12px">
+    ${S.settings.creatine ? `<div class="card"><div class="rem-row">
         <div><b>Creatine, 3 to 5 g</b><small>${creatineDays} of the last 7 days. Any time of day works; daily is what matters.</small></div>
         <button class="toggle ${b.creatine ? 'on' : ''}" data-a="creatine">${b.creatine ? 'Took it' : 'Not yet'}</button>
-      </div>` : ''}
-    </div>
+      </div></div>` : ''}
 
     ${eaten ? `<h2>Eaten ${date === today ? 'today' : 'this day'}</h2><div class="card flush">${eaten}</div>` : ''}
 
@@ -2083,7 +2087,6 @@ function viewStats() {
   const kcalWeek = sum(thisWeek.map(w => workoutKcal(w) || 0));
   const milesWeek = sum(thisWeek.flatMap(w => (w.activities || []).map(a => ((a.type === 'walk' || a.type === 'run' || a.kind === 'hike') && +a.dist) || 0)));
   const yogaWeek = thisWeek.flatMap(w => (w.activities || []).filter(a => a.type === 'yoga')).length;
-  const stepDays = soFar.map(d => (S.body[d] || {}).steps).filter(x => x > 0);
 
   const rows = weeks.slice(-12).reverse().map(x => `
     <div class="wk ${full(x) ? 'full' : ''}">
@@ -2113,10 +2116,9 @@ function viewStats() {
       <div class="kpi"><b>${round1(milesWeek)}</b><span>miles on foot</span></div>
       <div class="kpi"><b>${yogaWeek}</b><span>yoga classes</span></div>
     </div>
-    <div class="kpis">
-      <div class="kpi"><b>${stepDays.length ? fmtK(Math.round(sum(stepDays) / stepDays.length)) : '—'}</b><span>avg daily steps</span></div>
-      <div class="kpi"><b>${soFar.filter(d => (S.body[d] || {}).steps >= S.settings.stepGoal).length}/${soFar.length}</b><span>step goal days</span></div>
-      <div class="kpi"><b>${soFar.filter(d => (S.body[d] || {}).creatine).length}/${soFar.length}</b><span>creatine days</span></div>
+    <div class="kpis"${S.settings.creatine ? ' style="grid-template-columns:repeat(2,1fr)"' : ' style="grid-template-columns:1fr"'}>
+      <div class="kpi"><b>${soFar.filter(d => (S.body[d] || {}).weight != null).length}/${soFar.length}</b><span>weigh-in days</span></div>
+      ${S.settings.creatine ? `<div class="kpi"><b>${soFar.filter(d => (S.body[d] || {}).creatine).length}/${soFar.length}</b><span>creatine days</span></div>` : ''}
     </div>
     ${volumeCard(ws)}
     ${yogaStatsCard()}
@@ -2333,7 +2335,6 @@ function viewMore() {
 
     ${proteinCard()}
     ${reminderCard()}
-    ${stepsCard()}
 
     <h2>Backup</h2>
     <div class="card">
@@ -2368,7 +2369,7 @@ function profileCard() {
         <div class="st-inp" style="display:grid;place-items:center">${fmtHeight(S.settings.profile.heightIn)}</div>
         <button class="st-btn" data-a="set-height" data-d="1">+1″</button>
       </div>
-      <div class="sh-hint">Weight comes from your latest weigh-in${wi ? ` (${wi.weight} lb)` : ''}. Together they set your protein goal, calories, and steps.</div>
+      <div class="sh-hint">Weight comes from your latest weigh-in${wi ? ` (${wi.weight} lb)` : ''}. Together they set your protein goal and calories.</div>
       <label class="lbl">Yoga level</label>
       <div class="seg">
         <button class="${beginner ? 'on' : ''}" data-a="yoga-level" data-v="beginner">Beginner</button>
@@ -2385,12 +2386,6 @@ function goalCard() {
       <label class="lbl">Body goal</label>
       <div class="seg">${Object.entries(GOALS).map(([k, x]) => `<button class="${g === k ? 'on' : ''}" data-a="goal" data-v="${k}">${x.name}</button>`).join('')}</div>
       <div class="sh-hint">${GOALS[g].name}: ${GOALS[g].aim}. The Body tab checks your 7-day average against it${g === 'cut' ? ', and protein goes up to at least 1 g per lb' : ''}.</div>
-      <label class="lbl">Daily steps</label>
-      <div class="stepper three">
-        <button class="st-btn" data-a="step-goal" data-d="-1000">−1k</button>
-        <div class="st-inp" style="display:grid;place-items:center">${S.settings.stepGoal.toLocaleString()}</div>
-        <button class="st-btn" data-a="step-goal" data-d="1000">+1k</button>
-      </div>
       <div class="rem-row" style="margin-top:14px">
         <div><b>Track creatine</b><small>A daily check-off on the Body tab.</small></div>
         <button class="toggle ${S.settings.creatine ? 'on' : ''}" data-a="creatine-track">${S.settings.creatine ? 'On' : 'Off'}</button>
@@ -2446,60 +2441,6 @@ function reminderCard() {
   return `<h2>Reminders</h2><div class="card">${body}</div>`;
 }
 
-// Steps from Health: a Shortcut on the phone posts today's count to a private link, and the app
-// picks it up whenever it opens. A web app can't read the Health app directly.
-const stepsLink = () => `${PUSH_URL}/steps/${S.settings.stepsCode}`;
-function stepsCard() {
-  const code = S.settings.stepsCode, last = S.settings.stepsLast;
-  if (!code) {
-    return `<h2>Steps from Health</h2><div class="card">
-      <div class="muted small">Let an iPhone Shortcut copy your steps from the Health app into Lift Log every day, so you don't type them in.</div>
-      <button class="btn block" style="margin-top:12px" data-a="steps-on">Set it up</button></div>`;
-  }
-  const status = last
-    ? `Last update: ${esc(fmtK(last.n))} steps, ${esc(fmtDate(ymd(new Date(last.at)), { weekday: 'short' }))} at ${new Date(last.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
-    : 'Waiting for your Shortcut. Nothing has arrived yet.';
-  return `<h2>Steps from Health</h2><div class="card">
-    <div class="rem-row"><div><b>${last ? 'Connected' : 'Not connected yet'}</b><small>${status}</small></div>
-      <button class="btn" data-a="steps-sync">Check now</button></div>
-    <details class="more-opts" ${last ? '' : 'open'}><summary>How to set up the Shortcut</summary>
-      <ol class="steps-how">
-        <li>Tap <b>Copy link</b>. It's private to you.
-          <button class="btn block" style="margin-top:8px" data-a="steps-copy">Copy link</button></li>
-        <li>Open the <b>Shortcuts</b> app, tap <b>Automation</b>, then <b>+</b>, then <b>Time of Day</b>. Pick <b>9:00 PM</b>, <b>Daily</b>, and <b>Run Immediately</b>. Tap Next, then <b>New Blank Automation</b>.</li>
-        <li>Add the action <b>Find Health Samples</b>. Set Type to <b>Steps</b>, then add a filter: <b>Start Date is Today</b>.</li>
-        <li>Add <b>Calculate Statistics</b> and change Average to <b>Sum</b>.</li>
-        <li>Add <b>Get Contents of URL</b> and paste your link as the URL. Tap the arrow to show more: set Method to <b>POST</b> and Request Body to <b>JSON</b>, then add a <b>Number</b> field with the key <b>steps</b> and the value <b>Calculation Result</b>.</li>
-        <li>Tap Done. Open the automation and tap ▶ to test it, and allow Health when asked. Then tap <b>Check now</b> above.</li>
-      </ol>
-      <div class="sh-hint">Want steps sooner in the day? Add more times the same way, like noon and 6 PM. If you wear an Apple Watch and the number looks about double, add another filter in step 3: <b>Source is</b> your iPhone.</div>
-    </details>
-    <button class="linkbtn block center" data-a="steps-off">Turn off and forget the link</button>
-  </div>`;
-}
-let stepsChecked = 0;
-async function syncSteps(manual) {
-  if (!S.settings.stepsCode || (!manual && Date.now() - stepsChecked < 60000)) return;
-  stepsChecked = Date.now();
-  try {
-    const res = await fetch(stepsLink(), { cache: 'no-store' });
-    const list = (await res.json()).steps || [];
-    // Each post is that day's total so far, so the biggest one for a day is the latest.
-    const byDay = {};
-    list.forEach(x => { const d = ymd(new Date(x.at)); byDay[d] = Math.max(byDay[d] || 0, x.n); });
-    let changed = false;
-    Object.entries(byDay).forEach(([d, n]) => {
-      const b = bodyEntry(d);
-      if (n > (b.steps || 0)) { b.steps = n; saveBody(b); changed = true; }
-    });
-    const last = list[list.length - 1] || null;
-    if (JSON.stringify(last) !== JSON.stringify(S.settings.stepsLast || null)) { S.settings.stepsLast = last; saveSettings(); changed = true; }
-    if (manual) toast(last ? `Steps are up to date: ${fmtK(byDay[todayStr()] || 0)} today.` : 'Nothing yet. Run the Shortcut once, then check again.');
-    if (changed && !S.sheet && !typing()) render();
-  } catch (e) {
-    if (manual) toast("Couldn't reach the steps server. Check your connection.");
-  }
-}
 
 function viewProgDay() {
   const d = S.view.d, day = planOf(d);
@@ -2880,7 +2821,7 @@ function cleanBackup(d) {
   const n = v => (v === '' || v == null || !Number.isFinite(+v) ? '' : +v);
   d.workouts.forEach(w => {
     (w.exercises || []).forEach(e => { e.sets = e.sets.map(x => ({ ...x, w: n(x.w), r: n(x.r), rir: x.rir == null ? x.rir : n(x.rir) })); });
-    (w.activities || []).forEach(a => { ['dist', 'min', 'sec', 'hr'].forEach(k => { if (k in a) a[k] = n(a[k]); }); });
+    (w.activities || []).forEach(a => { ['dist', 'min', 'sec', 'hr'].forEach(k => { if (k in a) a[k] = n(a[k]); }); ['start', 'end'].forEach(k => { if (k in a && clockMin(a[k]) == null) a[k] = ''; }); });
   });
   (d.body || []).forEach(b => {
     if (b.weight != null) b.weight = n(b.weight) === '' ? null : n(b.weight);
@@ -3183,7 +3124,6 @@ const ACT = {
   'go-goal': () => { S.settings.welcomed = true; saveSettings(); ACT.tab({ t: 'more' }); const el = document.getElementById('about-card'); if (el) el.scrollIntoView({ block: 'start' }); },
   goal: d => { S.settings.goal = d.v; saveSettings(); render(); toast(`Goal: ${GOALS[d.v].name}`); },
   'creatine-track': () => { S.settings.creatine = !S.settings.creatine; saveSettings(); render(); },
-  'step-goal': d => { S.settings.stepGoal = Math.max(2000, Math.min(30000, S.settings.stepGoal + +d.d)); saveSettings(); render(); },
   creatine: () => { const b = bodyEntry(S.bodyDate); b.creatine = !b.creatine; saveBody(b); render(); },
   rir: d => {
     const w = getW(d.wid), e = w.exercises[+d.ex], s = e.sets[+d.s];
@@ -3358,16 +3298,13 @@ const ACT = {
   'prot-mode': d => { S.settings.proteinMode = d.v; saveSettings(); render(); },
   'set-perlb': d => { S.settings.proteinPerLb = Math.max(0.5, Math.min(1.5, round2(S.settings.proteinPerLb + +d.d))); saveSettings(); render(); },
   'rem-toggle': d => reminderToggle(d.k),
-  'steps-on': () => {
-    const rnd = crypto.getRandomValues(new Uint8Array(20));
-    S.settings.stepsCode = `s_${[...rnd].map(b => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('')}`;
-    S.settings.stepsLast = null;
-    saveSettings(); render();
+  'act-now': d => {
+    const w = getW(d.wid), a = w && w.activities[+d.i];
+    if (!a) return;
+    a[d.f] = nowClock();
+    actTimeSync(w, +d.i, d.f);
+    persist(w); render();
   },
-  'steps-copy': async () => {
-    try { await navigator.clipboard.writeText(stepsLink()); toast('Link copied. Paste it into the Shortcut.'); } catch (e) { prompt('Copy this link:', stepsLink()); }
-  },
-  'steps-sync': () => syncSteps(true),
   'care-set': d => {
     const sh = S.sheet, w = sh.wid != null ? getW(sh.wid) : null, e = w && sh.i != null ? w.exercises[sh.i] : null;
     const name = e ? e.name : sh.data.name, care = { ...(S.settings.care || {}) };
@@ -3413,11 +3350,6 @@ const ACT = {
       toast("Couldn't check for an update. Try again in a minute.");
     }
   },
-  'steps-off': () => {
-    if (!confirm('Turn off steps from Health? Steps you already have stay. You can set it up again later with a new link.')) return;
-    S.settings.stepsCode = null; S.settings.stepsLast = null;
-    saveSettings(); render();
-  },
   'rem-test': () => {
     pushApi('test', { id: S.settings.reminder.id })
       .then(() => toast('Sending in 5 seconds. Go to your Home Screen to see it.'))
@@ -3444,16 +3376,34 @@ document.addEventListener('click', ev => {
   const fn = ACT[b.dataset.a];
   if (fn) fn(b.dataset, b, ev);
 });
+// Start/finish fill in the length; typing a length by hand drops the times so the two never disagree.
+function actTimeSync(w, k, f) {
+  const a = w.activities[k];
+  if (!a || (a.type !== 'walk' && a.type !== 'run')) return;
+  if (f === 'start' || f === 'end') {
+    if (actFromTimes(a)) {
+      const mi = document.getElementById(`act-min-${k}`), se = document.getElementById(`act-sec-${k}`);
+      if (mi) mi.value = a.min;
+      if (se) se.value = a.sec;
+    }
+  } else if (f === 'min' || f === 'sec') {
+    a.start = ''; a.end = '';
+    document.querySelectorAll(`input[data-wid="${w.id}"][data-wb="activities.${k}.start"], input[data-wid="${w.id}"][data-wb="activities.${k}.end"]`).forEach(x => { x.value = ''; });
+  } else return;
+  const d = document.getElementById(`act-dur-${k}`);
+  if (d) d.textContent = durText(a);
+}
 document.addEventListener('input', ev => {
   const el = ev.target;
   if (el.dataset.wb && el.dataset.wb !== 'date') {
     const w = getW(el.dataset.wid);
     if (w) {
       setPath(w, el.dataset.wb, el.value);
+      const m = el.dataset.wb.match(/^activities\.(\d+)\.(\w+)/);
+      if (m) actTimeSync(w, +m[1], m[2]);
       saveSoon(w);
-      const m = el.dataset.wb.match(/^activities\.(\d+)\./);
       const box = m && document.getElementById(`act-stats-${m[1]}`);
-      if (box) box.textContent = actStatsText(w.activities[+m[1]], w.date) || 'Enter distance and time to see pace, calories, and steps.';
+      if (box) box.textContent = actStatsText(w.activities[+m[1]], w.date) || 'Enter distance and time to see pace and calories.';
     }
   } else if (el.dataset.ssf) {
     S.sheet[el.dataset.ssf] = el.value;
@@ -3479,10 +3429,6 @@ document.addEventListener('change', ev => {
   } else if (el.dataset.cmp && S.view && S.view.name === 'compare') {
     S.view = { ...S.view, [el.dataset.cmp]: el.value };
     render();
-  } else if (el.id === 'steps-inp') {
-    const b = bodyEntry(S.bodyDate);
-    b.steps = num(el.value) == null ? null : Math.round(num(el.value));
-    saveBody(b); setTimeout(render, 250);
   } else if (el.id === 'photo-file' && el.files[0]) {
     const f = el.files[0];
     el.value = '';
@@ -3516,7 +3462,7 @@ document.addEventListener('visibilitychange', () => {
     if (typing()) document.activeElement.blur();
     flushSaves();
     if (progTimer) { clearTimeout(progTimer); progTimer = null; saveProgram(); }
-  } else {
+  } else if (S.program) {
     if (T.iv) drawTimer();
     // A new day since you last looked: start from today everywhere.
     if (shownDay !== todayStr()) {
@@ -3527,7 +3473,6 @@ document.addEventListener('visibilitychange', () => {
       shownDay = todayStr();
     }
     if (!S.sheet && !typing()) render();
-    syncSteps();
     // Check for a new version every time the app comes back, not just on a cold start.
     if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {});
   }
@@ -3554,7 +3499,6 @@ document.addEventListener('visibilitychange', () => {
     });
   }
   if ((S.settings.reminder.on || S.settings.reminder.streakOn) && navigator.onLine) reminderSync().catch(() => {});
-  syncSteps();
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }

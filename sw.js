@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v14';
+const CACHE = 'liftlog-v15';
 const ASSETS = [
   './',
   './index.html',
@@ -99,7 +99,7 @@ async function reminderText() {
   // Training days count when you move; rest days also count with a weigh-in or protein.
   const day = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][now.getDay()];
   const days = kv.program && kv.program.days;
-  const todo = days && days[day] && days[day].type === 'rest' ? 'Move, weigh in, or hit your protein' : 'Lift, run, walk, do yoga, or hit your step goal';
+  const todo = days && days[day] && days[day].type === 'rest' ? 'Move, weigh in, or hit your protein' : 'Lift, run, walk, or do yoga';
   return n > 0
     ? { title: `Keep your ${n}-day streak 🔥`, body: `Today doesn't count yet. ${todo} before midnight.`, url: './' }
     : { title: 'Start a streak today 🔥', body: `${todo} and today counts.`, url: './' };
