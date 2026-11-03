@@ -358,7 +358,8 @@ function fillSets(e, w) {
   const done = e.sets.filter(s => s.done);
   e.sets = done.concat(Array.from({ length: Math.max(0, n - done.length) }, (_, m) => {
     const k = done.length + m;
-    return plan ? { w: plan.ws[k], r: plan.reps[Math.min(k, plan.reps.length - 1)], done: false }
+    const r = plan ? plan.reps[Math.min(k, plan.reps.length - 1)] : null;
+    return plan ? { w: plan.ws[k], r: low && r > 3 ? r - 2 : r, done: false }
       : { w: '', r: t.min ?? t.max ?? '', done: false };
   }));
 }
