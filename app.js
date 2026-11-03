@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -763,7 +763,7 @@ function latestWeighIn(date) {
 function proteinTargetFor(date) {
   if (S.settings.proteinMode === 'auto') {
     const b = latestWeighIn(date);
-    if (b) return Math.round(b.weight * S.settings.proteinPerLb / 5) * 5;
+    if (b) return Math.round(b.weight * S.settings.proteinPerLb);
   }
   return S.settings.proteinTarget;
 }
@@ -994,7 +994,7 @@ function proteinCard() {
         <div class="st-inp" style="display:grid;place-items:center">${S.settings.proteinPerLb.toFixed(2)} g</div>
         <button class="st-btn" data-a="set-perlb" data-d="0.05">+</button>
       </div>
-      <div class="sh-hint">${wi ? `Today's target is ${proteinTargetFor(today)} g, from your ${wi.weight} lb weigh-in.` : `Log your weight on the Body tab and the target follows it. Until then it's ${S.settings.proteinTarget} g.`} Rounded to the nearest 5 g. A common range for lifting is 0.7 to 1 g per pound.</div>`
+      <div class="sh-hint">${wi ? `Today's target is ${proteinTargetFor(today)} g, from your ${wi.weight} lb weigh-in.` : `Log your weight on the Body tab and the target follows it. Until then it's ${S.settings.proteinTarget} g.`} A common range for lifting is 0.7 to 1 g per pound.</div>`
       : `<label class="lbl">Grams per day</label>
       <div class="stepper three">
         <button class="st-btn" data-a="set-prot" data-d="-5">−5</button>
