@@ -467,3 +467,15 @@ body.flash::after {
 .alt-row span { color: var(--mut); font-size: 13px; font-weight: 650; margin-right: 2px; }
 .alt-row .chip { min-height: 38px; font-size: 13px; }
 .act-stats { margin-top: 12px; color: var(--acc); font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+/* v1.6: custom workouts, exercise changes, activities */
+.ex-head > .ex-btns { flex: none; display: flex; gap: 2px; }
+.add-row.four { grid-template-columns: repeat(4, 1fr); }
+.add-pair { margin-bottom: 12px; }
+.pick-row { margin-top: 4px; }
+.pick-row .chip { min-height: 44px; font-size: 15px; }
+.grid-add { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.grid-add .btn { margin: 0; padding: 0 18px; }
+.tap-hint { margin: 0 0 10px; }
+.linkbtn.block { display: block; width: 100%; }
+.center { text-align: center; }
