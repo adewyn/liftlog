@@ -442,9 +442,9 @@ body.flash::after {
 
 /* ---------- today summary + plans ---------- */
 .today-card { padding: 12px; }
-.day-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.day-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .day-strip button {
-  min-height: 58px; padding: 8px 10px; border-radius: 14px;
+  min-height: 58px; padding: 8px 8px; border-radius: 14px; min-width: 0;
   background: var(--s2); text-align: left;
 }
 .day-strip span { display: block; color: var(--mut); font-size: 12px; font-weight: 650; }
@@ -479,3 +479,37 @@ body.flash::after {
 .tap-hint { margin: 0 0 10px; }
 .linkbtn.block { display: block; width: 100%; }
 .center { text-align: center; }
+
+/* v1.7: trainer picks */
+.warmup { color: var(--mut); font-size: 14px; margin: 2px 2px 8px; }
+.rir { display: grid; gap: 6px; margin: 8px 0 4px; padding: 10px; border-radius: 14px; background: var(--s2); }
+.rir > span { color: var(--mut); font-size: 13px; font-weight: 650; }
+.rir .seg { background: var(--s1); }
+.rir .seg button { min-height: 40px; }
+.trend { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.trend > div { background: var(--s2); border-radius: 14px; padding: 10px 12px; }
+.trend b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.trend span { color: var(--mut); font-size: 12px; font-weight: 650; }
+.linkbtn.inline { min-height: 0; margin: 0; font-size: inherit; padding: 4px 0; }
+.row small.good, .row small.muted { display: inline; color: var(--good); font-size: 13px; }
+.row small.muted { color: var(--mut); }
+.deload { flex-wrap: wrap; }
+.vol { display: grid; gap: 10px; }
+.vol-row { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 10px; font-size: 14px; }
+.vol-row > span:first-child { color: var(--tx); font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vol-bar { position: relative; height: 10px; border-radius: 6px; background: var(--s2); }
+.vol-bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 6px; }
+.vol-bar .plan { background: var(--s3); }
+.vol-bar .done { background: var(--acc); }
+.vol-bar b { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--tx); border-radius: 1px; }
+.vol-n { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--mut); font-weight: 650; }
+.vol-n.low { color: var(--up); }
+.photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+.photos button { position: relative; aspect-ratio: 3 / 4; border-radius: 12px; overflow: hidden; background: var(--s2); }
+.photos img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photos span { position: absolute; left: 6px; bottom: 6px; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 6px; background: rgba(0, 0, 0, .55); color: #fff; }
+.photo-view { display: grid; gap: 8px; margin: 8px 0 4px; }
+.photo-view.two { grid-template-columns: 1fr 1fr; }
+.photo-view figure { margin: 0; }
+.photo-view img { width: 100%; max-height: 60vh; object-fit: contain; border-radius: 12px; background: var(--s2); display: block; }
+.photo-view figcaption { color: var(--mut); font-size: 12px; text-align: center; margin-top: 4px; }

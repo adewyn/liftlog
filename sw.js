@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v8';
+const CACHE = 'liftlog-v10';
 const ASSETS = [
   './',
   './index.html',
@@ -51,7 +51,7 @@ const toMin = t => { const [h, m] = String(t || '00:00').split(':').map(Number);
 function readKv(keys) {
   return new Promise(res => {
     const out = {};
-    const r = indexedDB.open('liftlog', 1);
+    const r = indexedDB.open('liftlog');
     r.onupgradeneeded = () => r.transaction.abort();
     r.onerror = () => res(out);
     r.onsuccess = () => {
@@ -66,7 +66,7 @@ function readKv(keys) {
 }
 
 async function reminderText() {
-  const kv = await readKv(['settings', 'streak']);
+  const kv = await readKv(['settings', 'streak', 'program']);
   const r = (kv.settings && kv.settings.reminder) || {};
   const now = new Date(), mins = now.getHours() * 60 + now.getMinutes();
   const today = ymd(now), yesterday = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
@@ -76,9 +76,13 @@ async function reminderText() {
   if (st.date === today && st.done) return { title: 'Today already counts 🔥', body: 'Nice work. See you tomorrow.', url: './' };
   // The streak at stake: what the app saw today, or yesterday's if that day counted.
   const n = st.date === today ? st.n : (st.date === yesterday && st.done ? st.n : 0);
+  // Training days count when you move; rest days also count with a weigh-in or protein.
+  const day = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][now.getDay()];
+  const days = kv.program && kv.program.days;
+  const todo = days && days[day] && days[day].type === 'rest' ? 'Move, weigh in, or hit your protein' : 'Lift, run, walk, do yoga, or hit your step goal';
   return n > 0
-    ? { title: `Keep your ${n}-day streak 🔥`, body: "You haven't done anything yet today. Train, weigh in, or hit your protein before midnight.", url: './' }
-    : { title: 'Start a streak today 🔥', body: 'Train, weigh in, or hit your protein and today counts.', url: './' };
+    ? { title: `Keep your ${n}-day streak 🔥`, body: `Today doesn't count yet. ${todo} before midnight.`, url: './' }
+    : { title: 'Start a streak today 🔥', body: `${todo} and today counts.`, url: './' };
 }
 
 self.addEventListener('push', e => {
