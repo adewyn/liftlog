@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v5';
+const CACHE = 'liftlog-v6';
 const ASSETS = [
   './',
   './index.html',

@@ -439,3 +439,31 @@ body.flash::after {
 .tip { background: rgba(198, 242, 78, .08); border-color: #3b4420; font-size: 15px; }
 .tip b { color: var(--acc); }
 .foot { color: var(--dim); font-size: 13px; text-align: center; margin: 24px 0 8px; }
+
+/* ---------- today summary + plans ---------- */
+.today-card { padding: 12px; }
+.day-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.day-strip button {
+  min-height: 58px; padding: 8px 10px; border-radius: 14px;
+  background: var(--s2); text-align: left;
+}
+.day-strip span { display: block; color: var(--mut); font-size: 12px; font-weight: 650; }
+.day-strip b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.day-strip .ok { background: rgba(198, 242, 78, .1); }
+.day-strip .ok b { color: var(--acc); }
+.energy { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.energy > span { color: var(--mut); font-size: 13px; font-weight: 650; flex: none; }
+.energy .seg { flex: 1; }
+.energy .seg button { min-height: 40px; }
+.today-card .sh-hint { margin: 8px 2px 0; }
+.plan-item { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.plan-item > div { flex: 1; min-width: 0; }
+.plan-item b { display: block; font-size: 17px; }
+.plan-item small { display: block; color: var(--mut); font-size: 14px; margin-top: 2px; }
+.plan-item .btn { flex: none; min-height: 46px; padding: 0 14px; font-size: 15px; }
+.plan-item.done b { color: var(--mut); text-decoration: line-through; text-decoration-color: var(--dim); }
+.plan-item > .ic { color: var(--good); width: 28px; height: 28px; }
+.alt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.alt-row span { color: var(--mut); font-size: 13px; font-weight: 650; margin-right: 2px; }
+.alt-row .chip { min-height: 38px; font-size: 13px; }
+.act-stats { margin-top: 12px; color: var(--acc); font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
