@@ -533,3 +533,10 @@ body.flash::after {
 .checkin-sum { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 44px; margin-top: 10px; padding: 0 2px; color: var(--mut); font-size: 14px; text-align: left; }
 .checkin-sum b { color: var(--tx); font-weight: 700; }
 .checkin-sum .linkbtn { margin: 0; min-height: 0; font-size: 14px; }
+
+/* v1.9: real dates on the day chips, other-day view */
+.chips.days .chip { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 52px; line-height: 1.15; }
+.chips.days .chip small { font-size: 12px; font-weight: 600; opacity: .75; }
+.back-today { min-height: 44px; padding: 0; font-size: 15px; }
+.day-lbl { margin: 14px 2px 6px; }
+.plan-card .row { padding: 10px 0; min-height: 0; }

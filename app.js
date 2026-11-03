@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -191,6 +191,7 @@ const S = {
   tab: 'today',
   view: null,        // a sub-screen: { name, ..., back }
   pickDay: null,     // { date, k }: a day picked on Today instead of the real weekday
+  dayView: null,     // another date this week shown on Today
   draft: null,       // today's session before anything is logged
   histSeg: 'workouts',
   bodyDate: todayStr(),
@@ -880,7 +881,9 @@ const actDef = a => ACTIVITIES.find(x => x.id === a.kind) || { ...CUSTOM_ACT, na
 const actLevel = (a, def) => Math.max(0, Math.min(def.mets.length - 1, a.level ?? Math.floor((def.mets.length - 1) / 2)));
 const actName = a => (a.type === 'other' ? a.name : a.type === 'yoga' ? `${YOGA_STYLES[a.style] || ''} yoga`.trim() : ACT_TYPES[a.type]);
 const ENERGY = { low: 'Low', ok: 'OK', great: 'Great' };
-const SLEEP = [[5, '<6'], [6.5, '6–7'], [7.5, '7–8'], [8.5, '8+']];
+const SLEEP = [[5, '5 or less'], [6, '6'], [7, '7'], [8, '8'], [9, '9+']];
+// Older entries were stored as range midpoints (6.5, 7.5); show them as the nearest hour.
+const sleepPick = v => (v == null ? null : SLEEP.reduce((a, b) => (Math.abs(b[0] - v) < Math.abs(a[0] - v) ? b : a)));
 const fmtK = n => (n >= 1000 ? `${round1(n / 1000)}k` : String(n));
 const ENERGY_HINT = {
   low: 'Taking it easier today: 2 sets a lift with no weight jumps, gentler yoga, and a walk instead of a run.',
@@ -1171,12 +1174,12 @@ function todaySummary(date, w) {
       <button class="${(b.steps || 0) >= S.settings.stepGoal ? 'ok' : ''}" data-a="go-body" data-f="steps-inp"><span>Steps</span><b>${b.steps ? fmtK(b.steps) : '—'}</b></button>
       <button class="${hasWork(w) ? 'ok' : ''}" data-a="scroll-work"><span>${w.type === 'strength' && w.exercises.length ? 'Sets' : w.type === 'rest' ? 'Today' : 'Workout'}</span><b>${status}</b></button>
     </div>
-    ${en && sleepFor(date) != null && !S.checkinOpen ? `<button class="checkin-sum" data-a="checkin-open"><span>Energy <b>${ENERGY[en]}</b> · Sleep <b>${(SLEEP.find(([v]) => v === sleepFor(date)) || [, ''])[1]} hrs</b></span><span class="linkbtn">Change</span></button>` : `
+    ${en && sleepFor(date) != null && !S.checkinOpen ? `<button class="checkin-sum" data-a="checkin-open"><span>Energy <b>${ENERGY[en]}</b> · Sleep <b>${sleepPick(sleepFor(date))[1]} hrs</b></span><span class="linkbtn">Change</span></button>` : `
     <div class="energy"><span>Energy</span>
       <div class="seg">${Object.entries(ENERGY).map(([k, n]) => `<button class="${en === k ? 'on' : ''}" data-a="energy" data-v="${k}">${n}</button>`).join('')}</div>
     </div>
     <div class="energy"><span>Sleep hrs</span>
-      <div class="seg">${SLEEP.map(([v, n]) => `<button class="${sleepFor(date) === v ? 'on' : ''}" data-a="sleep" data-v="${v}">${n}</button>`).join('')}</div>
+      <div class="seg">${SLEEP.map(([v, n]) => `<button class="${(sleepPick(sleepFor(date)) || [])[0] === v ? 'on' : ''}" data-a="sleep" data-v="${v}">${n}</button>`).join('')}</div>
     </div>`}
     <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How do you feel, and how did you sleep? Your plan adjusts to both.'}${sleepShort(date) ? ' Under 6 hours of sleep: no weight jumps and easier cardio today.' : ''}</div>
   </div>`;
@@ -1201,25 +1204,36 @@ function weekDoneKeys(ws) {
   const keys = new Set(S.workouts.filter(w => w.date >= ws && w.date <= end && did(w)).map(w => w.dayKey));
   return plannedKeys().filter(k => keys.has(k));
 }
+// Planned sessions done this week: matching weekdays, plus other days you trained, up to the plan's count.
+function weekDoneCount(ws) {
+  const keys = weekDoneKeys(ws), end = addDays(ws, 6);
+  const inWeek = S.workouts.filter(w => w.date >= ws && w.date <= end && hasWork(w));
+  const keyDays = new Set(inWeek.filter(w => keys.includes(w.dayKey)).map(w => w.date));
+  const extra = new Set(inWeek.filter(w => !keys.includes(w.dayKey) && !keyDays.has(w.date)).map(w => w.date)).size;
+  return Math.min(plannedKeys().length, keys.length + extra);
+}
 const plannedKeys = () => DAYS.filter(d => S.program.days[d].type !== 'rest');
 
 // ----- Today -----
+// This week's real dates. Tapping one shows that day: what you logged, or what's coming up.
+function weekChips(shown) {
+  const today = todayStr(), ws = weekStart(today);
+  return `<div class="chips days">${DAYS.map((d, k) => {
+    const date = addDays(ws, k);
+    const did = S.workouts.some(w => w.date === date && hasWork(w));
+    const cls = [date === shown ? 'on' : '', date === today ? 'today' : '', S.program.days[d].type === 'rest' ? 'rest' : ''].join(' ');
+    return `<button class="chip ${cls}" data-a="day-view" data-d="${date}" aria-label="${DAY_NAMES[d]} ${esc(fmtDate(date, { month: 'long', day: 'numeric' }))}">${DAY_SHORT[d]}<small>${parseYmd(date).getDate()}</small>${did ? '<span class="dot"></span>' : ''}</button>`;
+  }).join('')}</div>`;
+}
+const sessionBody = w => (w.type === 'strength' ? sessionStrength(w) : w.type === 'cardio' ? sessionCardio(w) : sessionRest(w));
+
 function viewToday() {
   const date = todayStr();
+  if (S.dayView && S.dayView !== date && weekStart(S.dayView) === weekStart(date)) return viewDay(S.dayView);
   const w = todaySession();
   const realKey = dayKeyOf(date);
-  const done = new Set(weekDoneKeys(weekStart(date)));
   const day = planOf(w.dayKey) || { label: w.label };
   const custom = !isDayKey(w.dayKey);
-  const chips = DAYS.map(d => {
-    const t = S.program.days[d].type;
-    const cls = [d === w.dayKey ? 'on' : '', d === realKey ? 'today' : '', t === 'rest' ? 'rest' : ''].join(' ');
-    return `<button class="chip ${cls}" data-a="pick-day" data-k="${d}">${DAY_SHORT[d]}${done.has(d) ? '<span class="dot"></span>' : ''}</button>`;
-  }).join('');
-  let body;
-  if (w.type === 'strength') body = sessionStrength(w);
-  else if (w.type === 'cardio') body = sessionCardio(w);
-  else body = sessionRest(w);
   return `
     <header class="top">
       <div class="top-row">
@@ -1228,16 +1242,49 @@ function viewToday() {
       </div>
       ${custom ? `<h1>${esc(w.label)}<span class="sub">${w.dayKey === 'free' ? 'Build it as you go' : 'One of your saved workouts'}</span></h1>`
         : `<h1>${DAY_NAMES[w.dayKey]}<span class="sub">${esc(day.label)}</span></h1>`}
-      ${!custom && w.dayKey !== realKey ? `<div class="note-line">Doing ${DAY_NAMES[w.dayKey]}'s session today.</div>` : ''}
+      ${!custom && w.dayKey !== realKey ? `<div class="note-line">Doing ${DAY_NAMES[w.dayKey]}'s session today. <button class="linkbtn inline" data-a="pick-day" data-k="${realKey}">Switch back</button></div>` : ''}
     </header>
     ${welcomeCard()}
     ${todaySummary(date, w)}
     ${backupNudge()}
     ${w.type === 'strength' && deloadState(date).active ? deloadCard(date) : ''}
-    <div class="chips days">${chips}</div>
+    ${weekChips(date)}
     <button class="linkbtn diff-btn ${custom ? 'on' : ''}" data-a="pick-other">${custom ? '✓ Doing a different workout · change' : '+ Different workout (saved or blank)'}</button>
     <div id="work"></div>
-    ${body}`;
+    ${sessionBody(w)}`;
+}
+
+// Another day this week: look back at what you logged, or ahead at what's planned.
+function viewDay(date) {
+  const k = dayKeyOf(date), plan = S.program.days[k], past = date < todayStr();
+  const logged = sortedW().filter(w => w.date === date && hasAny(w));
+  const missed = past && plan.type !== 'rest' && !weekDoneKeys(weekStart(date)).includes(k);
+  let body;
+  if (logged.length) {
+    body = logged.map(w => `${logged.length > 1 ? `<div class="lbl day-lbl">${esc(w.label)}</div>` : ''}${sessionBody(w)}`).join('');
+  } else if (past) {
+    body = `<div class="card empty"><b>Nothing logged</b>${plan.type === 'rest' ? 'It was a rest day.' : `The plan was ${esc(plan.label)}.`}</div>
+      <button class="btn block" data-a="past-open" data-d="${date}">+ Log something for ${DAY_NAMES[k]}</button>`;
+  } else body = previewDay(k, date);
+  return `<header class="top">
+      <div class="top-row"><button class="linkbtn back-today" data-a="day-view" data-d="${todayStr()}">‹ Back to today</button></div>
+      <h1>${DAY_NAMES[k]}<span class="sub">${esc(fmtDate(date, { month: 'long', day: 'numeric' }))} · ${past ? (logged.length ? esc(logged[0].label) : 'Past day') : `Coming up · ${esc(plan.label)}`}</span></h1>
+    </header>
+    ${weekChips(date)}
+    ${body}
+    ${missed || (!past && plan.type !== 'rest') ? `<button class="btn block" data-a="do-today" data-k="${k}">Do this workout today instead</button>` : ''}`;
+}
+function previewDay(k, date) {
+  const plan = S.program.days[k];
+  if (plan.type === 'rest') return '<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Nothing planned. Recover, eat your protein, and sleep well.</div></div>';
+  if (plan.type === 'cardio') {
+    const rec = recommendCardio(date, k);
+    return `<div class="card"><div class="lbl">The plan</div><b>${esc(rec.text)}</b><div class="muted small">${esc(rec.why || '')}</div></div>`;
+  }
+  const w = buildSession(k, date);
+  return `<div class="card plan-card"><div class="lbl">The plan</div>
+    ${w.exercises.map(e => `<div class="row"><div>${esc(e.name)}<div class="muted small">${esc(targetText(e.target))}</div></div>${e.sets[0] && +e.sets[0].w ? `<small>${fmtW(e.sets[0].w)} lb</small>` : ''}</div>`).join('')}
+    <div class="sh-hint">Weights are a starting guess. They update from what you lift before then.</div></div>`;
 }
 
 function sessionStrength(w) {
@@ -1270,12 +1317,9 @@ function sessionStrength(w) {
     </div>
     ${actCards(w)}
     ${notesCard(w)}
-    ${hasWork(w) ? `<div class="sh-hint center" style="margin-bottom:8px">${logged ? `About ${liftMinutes(w)} min lifting` : ''}${kcal ? `${logged ? ' · ' : ''}~${kcal} active cal` : ''}${logged ? ' so far' : ''}</div>` : ''}
+    ${total ? `<div class="sh-hint center" style="margin-bottom:8px">${logged} of ${total} sets${logged ? ` · about ${liftMinutes(w)} min` : ''}${kcal ? ` · ~${kcal} active cal` : ''}</div>` : ''}
     ${free && logged ? `<button class="btn block" data-a="save-plan" data-wid="${w.id}">Save as a workout you can repeat</button>` : ''}
     ${w.date === todayStr() && !deloadState(w.date).active ? deloadCard(w.date) : ''}
-    <button class="btn block big ${w.finishedAt ? 'good' : 'pri'}" data-a="finish" data-wid="${w.id}">
-      ${w.finishedAt ? `${ic('check')} Finished · ${logged} of ${total} sets` : `Finish workout · ${logged} of ${total} sets`}
-    </button>
     ${plan && w.date === todayStr() ? `<button class="linkbtn block center" data-a="plan-edit" data-k="${w.dayKey}">Edit ${isDayKey(w.dayKey) ? `${DAY_NAMES[w.dayKey]}'s` : 'this'} workout for next time</button>` : ''}`;
 }
 
@@ -1362,8 +1406,7 @@ function sessionCardio(w) {
       <button class="btn" data-a="act-pick" data-wid="${w.id}">+ Other</button>
     </div>
     ${notesCard(w)}
-    ${kcal ? `<div class="sh-hint center" style="margin-bottom:8px">~${kcal} active cal from this session</div>` : ''}
-    <button class="btn block big ${w.finishedAt ? 'good' : 'pri'}" data-a="finish" data-wid="${w.id}">${w.finishedAt ? `${ic('check')} Saved` : 'Save session'}</button>`;
+    <div class="sh-hint center">${kcal ? `~${kcal} active cal · ` : ''}Everything saves as you go.</div>`;
 }
 // Rest days can still hold a hike, a climb, or anything else.
 function sessionRest(w) {
@@ -1374,8 +1417,7 @@ function sessionRest(w) {
     ${actCards(w)}
     <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Activity</button>
     ${acts ? `${notesCard(w)}
-      ${kcal ? `<div class="sh-hint center" style="margin-bottom:8px">~${kcal} active cal today</div>` : ''}
-      <button class="btn block big ${w.finishedAt ? 'good' : 'pri'}" data-a="finish" data-wid="${w.id}">${w.finishedAt ? `${ic('check')} Saved` : 'Save'}</button>`
+      <div class="sh-hint center">${kcal ? `~${kcal} active cal · ` : ''}Everything saves as you go.</div>`
     : isToday ? '<button class="btn block" data-a="go-body">Log bodyweight and protein</button>' : ''}`;
 }
 function actCards(w, recC) {
@@ -1862,7 +1904,7 @@ function viewStats() {
   }
   const firstWeek = weekStart(worked.map(w => w.date).sort()[0]);
   const weeks = [];
-  for (let wk = firstWeek; wk <= ws; wk = addDays(wk, 7)) weeks.push({ wk, n: weekDoneKeys(wk).length });
+  for (let wk = firstWeek; wk <= ws; wk = addDays(wk, 7)) weeks.push({ wk, n: weekDoneCount(wk) });
   const full = x => need > 0 && x.n >= need;
   // Current streak: full weeks in a row, counting this week only once it is full.
   let streak = 0;
@@ -1897,7 +1939,7 @@ function viewStats() {
   return `<header class="top"><h1>Stats</h1></header>
     ${streakCard()}
     <div class="card">
-      <b>This week</b> <span class="muted">· ${doneNow.size} of ${need} planned sessions</span>
+      <b>This week</b> <span class="muted">· ${weekDoneCount(ws)} of ${need} planned sessions</span>
       <div class="week-dots">${dots}</div>
     </div>
     <div class="card streak">
@@ -2442,6 +2484,7 @@ async function importData(f) {
   let data;
   try { data = JSON.parse(await f.text()); } catch (e) { data = null; }
   if (!data || data.app !== 'liftlog' || !Array.isArray(data.workouts)) { toast("That file isn't a Lift Log backup."); return; }
+  if (data.kind === 'history') { await importHistory(data); return; }
   const when = data.exportedAt ? new Date(data.exportedAt).toLocaleDateString() : 'an unknown date';
   if (!confirm(`Replace everything on this phone with the backup from ${when}? It has ${data.workouts.length} workouts.`)) return;
   await Promise.all(['kv', 'workouts', 'body'].map(DB.clear));
@@ -2455,6 +2498,62 @@ async function importData(f) {
   S.pickDay = null;
   render();
   toast('Backup restored');
+}
+
+// A history file adds past days to what's here; it never replaces anything.
+// Days already on the phone are skipped, so importing the same file twice is safe.
+async function importHistory(data) {
+  const ws = data.workouts.filter(h => !getW(histId(h.date)));
+  const nPh = (data.photos || []).length;
+  if (!ws.length) { toast('Those days are already in your log.'); return; }
+  if (!confirm(`Add ${ws.length} past days (${esc(data.title || 'workout history')})${nPh ? ` and ${nPh} photos` : ''} to your log? Nothing on this phone gets replaced.`)) return;
+  const made = ws.map(h => {
+    const lifts = h.lifts || [];
+    const at = Date.parse(`${h.date}T12:00`);
+    return {
+      id: histId(h.date), date: h.date, dayKey: lifts.length ? 'free' : 'sun', type: lifts.length ? 'strength' : 'rest',
+      label: h.label || 'Workout', notes: h.notes || '', createdAt: at, finishedAt: at, imported: true,
+      activities: h.acts || [], exercises: lifts.map((x, k) => importedExercise(x, k, at)),
+    };
+  });
+  await DB.putMany('workouts', made);
+  made.forEach(adopt);
+  for (const b of data.body || []) {
+    const e = bodyEntry(b.date);
+    let changed = false;
+    if (b.weight != null && e.weight == null) { e.weight = b.weight; changed = true; }
+    if (b.items && !e.items.length) { e.items = b.items.map(g => ({ name: '', g })); changed = true; }
+    if (changed) saveBody(e);
+  }
+  let k = 0;
+  for (const ph of data.photos || []) {
+    const id = `ph_hist_${ph.date}_${k++}`;
+    if (S.photos.some(p => p.id === id)) continue;
+    const blob = await (await fetch(ph.data)).blob();
+    const p = { id, date: ph.date, at: Date.parse(`${ph.date}T12:00`) + k, blob };
+    S.photos.push(p);
+    await DB.put('photos', p);
+  }
+  S.view = null; S.tab = 'history';
+  render(); scrollTo(0, 0);
+  toast(`Added ${made.length} past days. Your stats and coach use them now.`, 5000);
+}
+const histId = date => `wh_${date.replace(/-/g, '')}`;
+// Past lifts line up with your program when the names match, so the coach picks up where you left off.
+function importedExercise(x, k, at) {
+  let plan = null;
+  allPlans().forEach(p => (p.groups || []).forEach(g => g.forEach(y => { if (!plan && keyOf(y.name) === keyOf(x.name)) plan = y; })));
+  const reps = x.sets.map(s => +s.r);
+  const t = classify({
+    name: x.name, sets: plan ? plan.sets : x.sets.length,
+    min: plan ? plan.min : Math.min(...reps), max: plan ? plan.max : Math.max(...reps),
+    inc: plan ? plan.inc : UP, kind: plan && plan.kind, body: plan && plan.body,
+  });
+  return {
+    key: keyOf(x.name), name: x.name, group: k, pid: null,
+    target: { sets: t.sets, min: t.min, max: t.max, inc: t.inc, kind: t.kind, body: t.body, stepSet: true, unit: 'reps', note: x.note || '' },
+    sets: x.sets.map((s, j) => ({ w: s.w, r: s.r, done: true, at: at + j * 120000 })), coach: null,
+  };
 }
 
 // ---------- actions ----------
@@ -2533,7 +2632,7 @@ function saveSessExercise() {
 }
 
 const ACT = {
-  tab: d => { S.tab = d.t; S.view = null; closeSheet(); render(); scrollTo(0, 0); },
+  tab: d => { S.tab = d.t; S.view = null; if (d.t === 'today') S.dayView = null; closeSheet(); render(); scrollTo(0, 0); },
   back: () => { S.view = S.view && S.view.back; render(); scrollTo(0, 0); },
   'pick-day': d => { S.pickDay = { date: todayStr(), k: d.k }; render(); },
   'pick-other': () => { S.sheet = { kind: 'other' }; renderSheet(); },
@@ -2629,15 +2728,8 @@ const ACT = {
     persist(w); render();
   },
   'ex-chart': d => { S.view = { name: 'exercise', key: d.key, back: S.view }; render(); scrollTo(0, 0); },
-  finish: d => {
-    const w = getW(d.wid);
-    const left = sum((w.exercises || []).map(e => e.sets.filter(s => !s.done).length));
-    if (!w.finishedAt && w.type === 'strength' && left && !confirm(`${left} set${left === 1 ? '' : 's'} not checked off. Finish anyway?`)) return;
-    w.finishedAt = Date.now();
-    flushSaves(); persist(w); stopTimer(); render();
-    const recs = newRecords(w);
-    if (recs.length) { haptic(); toast(`New record: ${recs.join(' and ')}!`); } else toast(w.type === 'strength' ? `Saved: ${sum((w.exercises || []).map(e => doneSets(e).length))} sets, about ${liftMinutes(w)} min. Nice work.` : 'Session saved.');
-  },
+  'day-view': d => { S.dayView = d.d === todayStr() ? null : d.d; render(); scrollTo(0, 0); },
+  'do-today': d => { S.pickDay = { date: todayStr(), k: d.k }; S.dayView = null; render(); scrollTo(0, 0); },
   'add-act': d => {
     const w = getW(d.wid);
     w.activities = w.activities || [];
@@ -2658,7 +2750,7 @@ const ACT = {
     persist(w); render();
   },
   energy: d => setEnergy(d.v),
-  sleep: d => { const b = bodyEntry(todayStr()); b.sleep = b.sleep === +d.v ? null : +d.v; saveBody(b); render(); },
+  sleep: d => { const b = bodyEntry(todayStr()); b.sleep = (sleepPick(b.sleep) || [])[0] === +d.v ? null : +d.v; saveBody(b); render(); },
   'go-body': d => {
     S.bodyDate = todayStr(); ACT.tab({ t: 'body' });
     const el = d && d.f && document.getElementById(d.f);
@@ -2715,14 +2807,15 @@ const ACT = {
   },
   'checkin-open': () => { S.checkinOpen = true; render(); },
   'ex-unfold': d => { S.unfold = { ...(S.unfold || {}), [`${d.wid}:${d.ex}`]: true }; render(); },
-  'past-open': () => { S.sheet = { kind: 'past', date: addDays(todayStr(), -1) }; renderSheet(); },
+  'past-open': d => { S.sheet = { kind: 'past', date: d.d || addDays(todayStr(), -1) }; renderSheet(); },
   'past-make': d => {
     const date = ($('#past-date') || {}).value || S.sheet.date;
     if (date > todayStr()) { toast('Pick today or an earlier day.'); return; }
     const w = buildSession(d.k, date);
     w.finishedAt = Date.now();
     persist(w); closeSheet();
-    S.tab = 'history'; S.view = { name: 'workout', id: w.id, back: null };
+    if (S.tab === 'today' && weekStart(date) === weekStart(todayStr())) S.dayView = date;
+    else { S.tab = 'history'; S.view = { name: 'workout', id: w.id, back: null }; }
     render(); scrollTo(0, 0);
   },
   'ask-rir': () => { S.settings.askRir = S.settings.askRir === false; saveSettings(); render(); },
@@ -2890,6 +2983,10 @@ document.addEventListener('change', ev => {
     saveBody(b);
     if (S.bodyDate === todayStr() && b.weight != null) reminderWeighed();
     render();
+  } else if (el.dataset.wb && /^activities\./.test(el.dataset.wb)) {
+    const w = getW(el.dataset.wid);
+    const recs = w ? newRecords(w).filter(m => !(w.recShown || []).includes(m)) : [];
+    if (recs.length) { w.recShown = [...(w.recShown || []), ...recs]; persist(w); haptic(); toast(`New record: ${recs.join(' and ')}!`); }
   } else if (el.id === 'steps-inp') {
     const b = bodyEntry(S.bodyDate);
     b.steps = num(el.value) == null ? null : Math.round(num(el.value));
@@ -2945,7 +3042,7 @@ document.addEventListener('visibilitychange', () => {
   if (S.notice) { const n = S.notice; S.notice = null; setTimeout(() => toast(n, 7000), 600); }
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', ev => {
-      if (ev.data && ev.data.open) { S.tab = ev.data.open; S.view = null; S.bodyDate = todayStr(); S.pickDay = null; closeSheet(); render(); scrollTo(0, 0); }
+      if (ev.data && ev.data.open) { S.tab = ev.data.open; S.view = null; S.bodyDate = todayStr(); S.pickDay = null; S.dayView = null; closeSheet(); render(); scrollTo(0, 0); }
     });
   }
   if ((S.settings.reminder.on || S.settings.reminder.streakOn) && navigator.onLine) reminderSync().catch(() => {});
