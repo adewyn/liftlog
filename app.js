@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -492,6 +492,56 @@ function render() {
   if (S.view) html = ({ workout: viewWorkout, exercise: viewExercise, progDay: viewProgDay })[S.view.name]();
   else html = ({ today: viewToday, history: viewHistory, body: viewBody, stats: viewStats, more: viewMore })[S.tab]();
   $('#view').innerHTML = html;
+  celebrateDay();
+}
+
+// ----- daily streak -----
+// A day counts if you trained, weighed in, or hit your protein goal.
+function dayCounts(date) {
+  const b = S.body[date];
+  if (b && (b.weight != null || (b.protein || 0) >= proteinTargetFor(date))) return true;
+  return S.workouts.some(w => w.date === date && hasWork(w));
+}
+// Today still keeps the streak alive until midnight, so count back from yesterday if today isn't done yet.
+function dailyStreak() {
+  let d = dayCounts(todayStr()) ? todayStr() : addDays(todayStr(), -1);
+  let n = 0;
+  while (dayCounts(d)) { n++; d = addDays(d, -1); }
+  return n;
+}
+function bestStreak() {
+  const dates = [...S.workouts.filter(hasWork).map(w => w.date), ...Object.keys(S.body)].sort();
+  let best = 0, run = 0;
+  for (let d = dates[0], today = todayStr(); d && d <= today; d = addDays(d, 1)) {
+    run = dayCounts(d) ? run + 1 : 0;
+    best = Math.max(best, run);
+  }
+  return best;
+}
+// The first time today counts, cheer once.
+function celebrateDay() {
+  const today = todayStr(), done = dayCounts(today);
+  if (S.celebrated && S.celebrated.date === today && !S.celebrated.done && done) {
+    const n = dailyStreak();
+    haptic();
+    setTimeout(() => toast(n > 1 ? `🔥 ${n}-day streak! Today counts.` : '🔥 Day 1. Your streak starts now.'), 900);
+  }
+  S.celebrated = { date: today, done };
+}
+function streakCard() {
+  const today = todayStr(), n = dailyStreak(), best = Math.max(bestStreak(), n), done = dayCounts(today);
+  const start = addDays(weekStart(today), -21);
+  const cells = Array.from({ length: 28 }, (_, k) => {
+    const d = addDays(start, k);
+    const cls = [d > today ? 'future' : dayCounts(d) ? 'on' : '', d === today ? 'today' : ''].join(' ');
+    return `<i class="${cls}"></i>`;
+  }).join('');
+  return `<div class="card">
+      <div class="streak"><div class="big-num">🔥 ${n}</div>
+        <div><b>day streak</b><div class="muted small">Best: ${best} day${best === 1 ? '' : 's'}</div></div></div>
+      <div class="sh-hint">${done ? 'Today counts. See you tomorrow.' : n ? 'Keep it going today: train, weigh in, or hit your protein.' : 'Train, weigh in, or hit your protein today to start one.'}</div>
+      <div class="cal">${DAYS.map(d => `<span>${DAY_SHORT[d][0]}</span>`).join('')}${cells}</div>
+    </div>`;
 }
 
 function weekDoneKeys(ws) {
@@ -520,7 +570,10 @@ function viewToday() {
     <button class="btn block" data-a="tab" data-t="body">Log bodyweight and protein</button>`;
   return `
     <header class="top">
-      <div class="eyebrow">${esc(fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+      <div class="top-row">
+        <div class="eyebrow">${esc(fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+        <button class="streak-pill ${dayCounts(date) ? 'on' : ''}" data-a="tab" data-t="stats" aria-label="Daily streak">🔥 ${dailyStreak()}</button>
+      </div>
       <h1>${DAY_NAMES[w.dayKey]}<span class="sub">${esc(day.label)}</span></h1>
       ${w.dayKey !== realKey ? `<div class="note-line">Doing ${DAY_NAMES[w.dayKey]}'s session today.</div>` : ''}
     </header>
@@ -878,8 +931,9 @@ function viewStats() {
   const worked = S.workouts.filter(hasWork);
   if (!worked.length) {
     return `<header class="top"><h1>Stats</h1></header>
+      ${streakCard()}
       <div class="card"><b>This week</b><div class="week-dots">${dots}</div></div>
-      <div class="card empty"><b>Nothing to count yet</b>Finish your first session and your streak starts here.</div>`;
+      <div class="card empty"><b>No sessions yet</b>Finish your first workout and your weekly numbers show up here.</div>`;
   }
   const firstWeek = weekStart(worked.map(w => w.date).sort()[0]);
   const weeks = [];
@@ -912,13 +966,14 @@ function viewStats() {
     </div>`).join('');
 
   return `<header class="top"><h1>Stats</h1></header>
+    ${streakCard()}
     <div class="card">
       <b>This week</b> <span class="muted">· ${doneNow.size} of ${need} planned sessions</span>
       <div class="week-dots">${dots}</div>
     </div>
     <div class="card streak">
       <div class="big-num">${streak}</div>
-      <div><b>week${streak === 1 ? '' : 's'} in a row</b><div class="muted small">with every planned session done · best ${best}</div></div>
+      <div><b>full week${streak === 1 ? '' : 's'} in a row</b><div class="muted small">with every planned session done · best ${best}</div></div>
     </div>
     <div class="kpis">
       <div class="kpi"><b>${setsWeek}</b><span>sets this week</span></div>
