@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.9';
+const APP_VERSION = '1.9.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1778,7 +1778,7 @@ function viewBody() {
       <label class="lbl" for="steps-inp">Steps</label>
       <input class="inp" id="steps-inp" inputmode="numeric" value="${b.steps ?? ''}" placeholder="From your Health app">
       <div class="prog ${(b.steps || 0) >= S.settings.stepGoal ? 'hit' : ''}" style="margin-top:10px"><div style="width:${Math.min(100, (b.steps || 0) / S.settings.stepGoal * 100)}%"></div></div>
-      <div class="sh-hint">Goal ${S.settings.stepGoal.toLocaleString()} a day. Open the Health app, tap Steps, and copy today's number. Daily steps are one of the biggest helps for staying lean.</div>
+      <div class="sh-hint">Goal ${S.settings.stepGoal.toLocaleString()} a day. ${S.settings.stepsCode ? 'Your Shortcut fills this in from the Health app.' : 'Type it from the Health app, or let a Shortcut fill it in: More → Steps from Health.'} Daily steps are one of the biggest helps for staying lean.</div>
       ${S.settings.creatine ? `<div class="rem-row" style="margin-top:12px">
         <div><b>Creatine, 3 to 5 g</b><small>${creatineDays} of the last 7 days. Any time of day works; daily is what matters.</small></div>
         <button class="toggle ${b.creatine ? 'on' : ''}" data-a="creatine">${b.creatine ? 'Took it' : 'Not yet'}</button>
@@ -2059,6 +2059,7 @@ function viewMore() {
 
     ${proteinCard()}
     ${reminderCard()}
+    ${stepsCard()}
 
     <h2>Backup</h2>
     <div class="card">
@@ -2068,12 +2069,18 @@ function viewMore() {
       <div class="sh-hint">${S.persisted === true ? 'Storage is marked as protected on this device.' : S.persisted === false ? 'Storage is not marked as protected yet. Installing to the Home Screen helps.' : ''}</div>
     </div>
 
+    <h2>App version</h2>
+    <div class="card"><div class="rem-row">
+      <div><b>Lift Log ${APP_VERSION}</b><small>Updates install on their own. Tap to get one right now.</small></div>
+      <button class="btn" data-a="check-update">Update now</button>
+    </div></div>
+
     <h2>Start over</h2>
     <div class="card">
       <button class="btn danger block" data-a="prog-reset">Reset program to the original</button>
       <div class="sh-hint">Only resets the exercises and days. Your logged history stays.</div>
     </div>
-    <div class="foot">Lift Log ${APP_VERSION} · works offline · no account</div>`;
+    <div class="foot">Works offline · no account · your data stays on this phone</div>`;
 }
 
 function profileCard() {
@@ -2163,6 +2170,61 @@ function reminderCard() {
       ${r.on || r.streakOn ? '<button class="btn block" style="margin-top:14px" data-a="rem-test">Send a test</button>' : ''}`;
   }
   return `<h2>Reminders</h2><div class="card">${body}</div>`;
+}
+
+// Steps from Health: a Shortcut on the phone posts today's count to a private link, and the app
+// picks it up whenever it opens. A web app can't read the Health app directly.
+const stepsLink = () => `${PUSH_URL}/steps/${S.settings.stepsCode}`;
+function stepsCard() {
+  const code = S.settings.stepsCode, last = S.settings.stepsLast;
+  if (!code) {
+    return `<h2>Steps from Health</h2><div class="card">
+      <div class="muted small">Let an iPhone Shortcut copy your steps from the Health app into Lift Log every day, so you don't type them in.</div>
+      <button class="btn block" style="margin-top:12px" data-a="steps-on">Set it up</button></div>`;
+  }
+  const status = last
+    ? `Last update: ${esc(fmtK(last.n))} steps, ${esc(fmtDate(ymd(new Date(last.at)), { weekday: 'short' }))} at ${new Date(last.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    : 'Waiting for your Shortcut. Nothing has arrived yet.';
+  return `<h2>Steps from Health</h2><div class="card">
+    <div class="rem-row"><div><b>${last ? 'Connected' : 'Almost there'}</b><small>${status}</small></div>
+      <button class="btn" data-a="steps-sync">Check now</button></div>
+    <details class="more-opts" ${last ? '' : 'open'}><summary>How to set up the Shortcut</summary>
+      <ol class="steps-how">
+        <li>Tap <b>Copy link</b>. It's private to you.
+          <button class="btn block" style="margin-top:8px" data-a="steps-copy">Copy link</button></li>
+        <li>Open the <b>Shortcuts</b> app, tap <b>Automation</b>, then <b>+</b>, then <b>Time of Day</b>. Pick <b>9:00 PM</b>, <b>Daily</b>, and <b>Run Immediately</b>. Tap Next, then <b>New Blank Automation</b>.</li>
+        <li>Add the action <b>Find Health Samples</b>. Set Type to <b>Steps</b>, then add a filter: <b>Start Date is Today</b>.</li>
+        <li>Add <b>Calculate Statistics</b> and change Average to <b>Sum</b>.</li>
+        <li>Add <b>Get Contents of URL</b> and paste your link as the URL. Tap the arrow to show more: set Method to <b>POST</b> and Request Body to <b>JSON</b>, then add a <b>Number</b> field with the key <b>steps</b> and the value <b>Calculation Result</b>.</li>
+        <li>Tap Done. Open the automation and tap ▶ to test it, and allow Health when asked. Then tap <b>Check now</b> above.</li>
+      </ol>
+      <div class="sh-hint">Want steps sooner in the day? Add more times the same way, like noon and 6 PM. If you wear an Apple Watch and the number looks about double, add another filter in step 3: <b>Source is</b> your iPhone.</div>
+    </details>
+    <button class="linkbtn block center" data-a="steps-off">Turn off and forget the link</button>
+  </div>`;
+}
+let stepsChecked = 0;
+async function syncSteps(manual) {
+  if (!S.settings.stepsCode || (!manual && Date.now() - stepsChecked < 60000)) return;
+  stepsChecked = Date.now();
+  try {
+    const res = await fetch(stepsLink(), { cache: 'no-store' });
+    const list = (await res.json()).steps || [];
+    // Each post is that day's total so far, so the biggest one for a day is the latest.
+    const byDay = {};
+    list.forEach(x => { const d = ymd(new Date(x.at)); byDay[d] = Math.max(byDay[d] || 0, x.n); });
+    let changed = false;
+    Object.entries(byDay).forEach(([d, n]) => {
+      const b = bodyEntry(d);
+      if (n > (b.steps || 0)) { b.steps = n; saveBody(b); changed = true; }
+    });
+    const last = list[list.length - 1] || null;
+    if (JSON.stringify(last) !== JSON.stringify(S.settings.stepsLast || null)) { S.settings.stepsLast = last; saveSettings(); changed = true; }
+    if (manual) toast(last ? `Steps are up to date: ${fmtK(byDay[todayStr()] || 0)} today.` : 'Nothing yet. Run the Shortcut once, then check again.');
+    if (changed && !S.sheet) render();
+  } catch (e) {
+    if (manual) toast("Couldn't reach the steps server. Check your connection.");
+  }
 }
 
 function viewProgDay() {
@@ -2483,21 +2545,36 @@ async function importData(f) {
   if (!f) return;
   let data;
   try { data = JSON.parse(await f.text()); } catch (e) { data = null; }
-  if (!data || data.app !== 'liftlog' || !Array.isArray(data.workouts)) { toast("That file isn't a Lift Log backup."); return; }
-  if (data.kind === 'history') { await importHistory(data); return; }
+  // History files say app 'liftlog-history' so versions before 1.9 refuse them instead of replacing everything.
+  if (data && (data.app === 'liftlog-history' || (data.app === 'liftlog' && data.kind === 'history')) && Array.isArray(data.workouts)) { await importHistory(data); return; }
+  const ok = data && data.app === 'liftlog' && Array.isArray(data.workouts)
+    && data.workouts.every(w => w && typeof w.id === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(w.date || ''))
+    && (data.body || []).every(b => b && typeof b.date === 'string');
+  if (!ok) { toast("That file isn't a Lift Log backup. Nothing was changed."); return; }
   const when = data.exportedAt ? new Date(data.exportedAt).toLocaleDateString() : 'an unknown date';
   if (!confirm(`Replace everything on this phone with the backup from ${when}? It has ${data.workouts.length} workouts.`)) return;
-  await Promise.all(['kv', 'workouts', 'body'].map(DB.clear));
-  await DB.put('kv', { k: 'program', v: data.program || defaultProgram() });
-  await DB.put('kv', { k: 'settings', v: { ...DEFAULT_SETTINGS, ...(data.settings || {}) } });
-  await DB.putMany('workouts', data.workouts);
-  await DB.putMany('body', data.body || []);
-  await DB.put('kv', { k: 'foods', v: data.foods || [] });
+  // Keep what's here so a bad restore can be put back.
+  const before = { program: S.program, settings: S.settings, workouts: S.workouts, body: Object.values(S.body), foods: S.foods };
+  const write = async d => {
+    await Promise.all(['kv', 'workouts', 'body'].map(DB.clear));
+    await DB.put('kv', { k: 'program', v: d.program || defaultProgram() });
+    await DB.put('kv', { k: 'settings', v: { ...DEFAULT_SETTINGS, ...(d.settings || {}) } });
+    await DB.putMany('workouts', d.workouts);
+    await DB.putMany('body', d.body || []);
+    await DB.put('kv', { k: 'foods', v: d.foods || [] });
+  };
+  try {
+    await write(data);
+  } catch (err) {
+    await write(before).catch(() => {});
+    await loadState(); render();
+    toast(`Couldn't restore that backup (${err.message}). Your data is as it was.`, 7000);
+    return;
+  }
   await loadState();
-  S.view = null;
-  S.pickDay = null;
+  S.view = null; S.pickDay = null; S.dayView = null;
   render();
-  toast('Backup restored');
+  toastUndo('Backup restored.', async () => { await write(before); await loadState(); render(); toast('Put back the way it was.'); }, 'Undo', 10000);
 }
 
 // A history file adds past days to what's here; it never replaces anything.
@@ -2929,6 +3006,40 @@ const ACT = {
   'prot-mode': d => { S.settings.proteinMode = d.v; saveSettings(); render(); },
   'set-perlb': d => { S.settings.proteinPerLb = Math.max(0.5, Math.min(1.5, round2(S.settings.proteinPerLb + +d.d))); saveSettings(); render(); },
   'rem-toggle': d => reminderToggle(d.k),
+  'steps-on': () => {
+    const rnd = crypto.getRandomValues(new Uint8Array(20));
+    S.settings.stepsCode = `s_${[...rnd].map(b => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('')}`;
+    S.settings.stepsLast = null;
+    saveSettings(); render();
+  },
+  'steps-copy': async () => {
+    try { await navigator.clipboard.writeText(stepsLink()); toast('Link copied. Paste it into the Shortcut.'); } catch (e) { prompt('Copy this link:', stepsLink()); }
+  },
+  'steps-sync': () => syncSteps(true),
+  'check-update': async () => {
+    if (!navigator.onLine) { toast("You're offline. Connect and try again."); return; }
+    toast('Checking for an update…', 8000);
+    try {
+      // no-store skips the offline copy (see sw.js), so this reads what's live right now.
+      const txt = await (await fetch(`./app.js?check=${Date.now()}`, { cache: 'no-store' })).text();
+      const v = (txt.match(/APP_VERSION = '([\d.]+)'/) || [])[1];
+      if (!v) throw new Error('no version');
+      if (v === APP_VERSION) { toast(`You're on the latest version, ${APP_VERSION}.`); return; }
+      toast(`Updating to ${v}…`, 8000);
+      flushSaves();
+      const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+      if (reg) await reg.update().catch(() => {});
+      for (const k of await caches.keys()) await caches.delete(k);
+      location.reload();
+    } catch (e) {
+      toast("Couldn't check for an update. Try again in a minute.");
+    }
+  },
+  'steps-off': () => {
+    if (!confirm('Turn off steps from Health? Steps you already have stay. You can set it up again later with a new link.')) return;
+    S.settings.stepsCode = null; S.settings.stepsLast = null;
+    saveSettings(); render();
+  },
   'rem-test': () => {
     pushApi('test', { id: S.settings.reminder.id })
       .then(() => toast('Sending in 5 seconds. Go to your Home Screen to see it.'))
@@ -3022,6 +3133,9 @@ document.addEventListener('visibilitychange', () => {
     if (T.iv) drawTimer();
     if (S.bodyDate > todayStr()) S.bodyDate = todayStr();
     if (!S.sheet) render();
+    syncSteps();
+    // Check for a new version every time the app comes back, not just on a cold start.
+    if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {});
   }
 });
 
@@ -3046,6 +3160,7 @@ document.addEventListener('visibilitychange', () => {
     });
   }
   if ((S.settings.reminder.on || S.settings.reminder.streakOn) && navigator.onLine) reminderSync().catch(() => {});
+  syncSteps();
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }

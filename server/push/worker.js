@@ -4,25 +4,33 @@
 //   - the weigh-in reminder, unless they've already weighed in that day
 //   - the streak saver, unless they've already done something that day
 // The pushes carry no data; the app's sw.js works out which one it is and what to say.
+//
+// It also holds step counts: an iPhone Shortcut posts today's steps from the Health app to
+// /steps/<private code>, and the app reads them back from the same address. Only the
+// numbers and when they arrived are kept, the last 60 per code.
 
 const ALLOWED_ORIGINS = ['https://adewyn.github.io', 'http://localhost:8790'];
 const PUSH_HOSTS = [/(^|\.)push\.apple\.com$/, /^fcm\.googleapis\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /\.notify\.windows\.com$/];
 const MAX_SUBS = 50;
+const MAX_STEP_CODES = 50;
+const STEP_PATH = /^steps\/(s_[a-z0-9]{16,40})$/;
 
 export default {
   async fetch(req, env, ctx) {
     const origin = req.headers.get('origin') || '';
     const cors = {
       'access-control-allow-origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
-      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-methods': 'GET, POST, OPTIONS',
       'access-control-allow-headers': 'content-type',
       vary: 'origin',
     };
     const reply = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'content-type': 'application/json' } });
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
+    const path = new URL(req.url).pathname.replace(/^\/+/, '');
+    const stepCode = (path.match(STEP_PATH) || [])[1];
+    if (stepCode) return steps(req, env, stepCode, reply);
     if (req.method !== 'POST') return reply({ ok: true, service: 'liftlog-push' });
 
-    const path = new URL(req.url).pathname.replace(/^\/+/, '');
     let body;
     try { body = await req.json(); } catch { return reply({ error: 'bad request' }, 400); }
     const id = String(body.id || '');
@@ -90,6 +98,26 @@ export default {
     if (changed) await saveSubs(env, subs);
   },
 };
+
+// GET returns what's been posted; POST adds today's count (JSON, a form field, or plain text).
+async function steps(req, env, code, reply) {
+  const all = (await env.SUBS.get('steps', 'json')) || {};
+  if (req.method === 'GET') return reply({ ok: true, steps: all[code] || [] });
+  if (req.method !== 'POST') return reply({ error: 'not found' }, 404);
+  let n;
+  const type = req.headers.get('content-type') || '';
+  try {
+    if (type.includes('json')) n = (await req.json()).steps;
+    else if (type.includes('form')) n = (await req.formData()).get('steps');
+    else n = await req.text();
+  } catch { return reply({ error: 'bad request' }, 400); }
+  n = Math.round(parseFloat(String(n ?? '').replace(/,/g, '')));
+  if (!(n >= 0 && n <= 200000)) return reply({ error: 'steps should be a number' }, 400);
+  if (!all[code] && Object.keys(all).length >= MAX_STEP_CODES) return reply({ error: 'server is full' }, 503);
+  all[code] = [...(all[code] || []), { at: Date.now(), n }].slice(-60);
+  await env.SUBS.put('steps', JSON.stringify(all));
+  return reply({ ok: true, steps: n });
+}
 
 async function loadSubs(env) {
   return (await env.SUBS.get('subs', 'json')) || {};

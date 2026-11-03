@@ -540,3 +540,6 @@ body.flash::after {
 .back-today { min-height: 44px; padding: 0; font-size: 15px; }
 .day-lbl { margin: 14px 2px 6px; }
 .plan-card .row { padding: 10px 0; min-height: 0; }
+.steps-how { margin: 10px 0 0; padding-left: 22px; }
+.steps-how li { margin-bottom: 10px; line-height: 1.45; color: var(--mut); }
+.steps-how li b { color: var(--tx); }
