@@ -1,12 +1,20 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
 const ACT_TYPES = { yoga: 'Yoga', walk: 'Walk', run: 'Run' };
-const DEFAULT_SETTINGS = { restSec: 90, proteinTarget: 155, sound: true, lastBackup: null };
+const COACH_MARK = { up: '▲', down: '▼', reps: '↗', hold: '→', beat: '★' };
+const DEFAULT_SETTINGS = {
+  restSec: 90, sound: true, lastBackup: null,
+  proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
+  reminder: { on: false, time: '09:00', id: null },
+};
+// The weigh-in reminder server (server/push in this folder) and its public key.
+const PUSH_URL = 'https://liftlog-push.sporebound.workers.dev';
+const VAPID_PUBLIC = 'BA_437YE5zeBtTMqdI9k9Ek1Jl9qu4Bo9Hmuen9bQmLNGn0MwZUngKJpCJSVXwj1lDQeCmGnbmKQ1zVhWV8yZLc';
 
 // ---------- helpers ----------
 const $ = sel => document.querySelector(sel);
@@ -124,6 +132,7 @@ const S = {
   settings: { ...DEFAULT_SETTINGS },
   workouts: [],
   body: {},
+  foods: [],
   tab: 'today',
   view: null,        // a sub-screen: { name, ..., back }
   pickDay: null,     // { date, k }: a day picked on Today instead of the real weekday
@@ -138,6 +147,8 @@ async function loadState() {
   const kv = Object.fromEntries((await DB.all('kv')).map(r => [r.k, r.v]));
   S.program = kv.program || defaultProgram();
   S.settings = { ...DEFAULT_SETTINGS, ...(kv.settings || {}) };
+  S.settings.reminder = { ...DEFAULT_SETTINGS.reminder, ...((kv.settings || {}).reminder || {}) };
+  S.foods = kv.foods || [];
   if (!kv.program) await saveProgram();
   S.workouts = await DB.all('workouts');
   S.body = {};
@@ -190,28 +201,74 @@ function targetText(t) {
   return s;
 }
 
-// The most recent earlier session of this exercise, with only the logged sets.
-function lastPerf(key, w) {
+// Earlier sessions of this exercise (newest first), with only the logged sets.
+function recentPerf(key, w, n) {
+  const out = [];
   for (const o of sortedW()) {
+    if (out.length >= n) break;
     if (o.id === w.id) continue;
     if (o.date > w.date || (o.date === w.date && o.createdAt > w.createdAt)) continue;
-    for (const e of o.exercises || []) {
-      if (e.key !== key) continue;
-      const sets = doneSets(e);
-      if (sets.length) return { date: o.date, sets };
-    }
+    const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length);
+    if (e) out.push({ date: o.date, sets: doneSets(e) });
   }
-  return null;
+  return out;
+}
+const lastPerf = (key, w) => recentPerf(key, w, 1)[0] || null;
+const roundTo = (v, step) => Math.round(v / step) * step;
+
+// Today's plan for an exercise, worked out from the last two sessions:
+// top of the range on every set → more weight; inside the range → same weight, one more rep;
+// short of the range → same weight again; short two sessions running → drop about 10%.
+function coachPlan(t, recent) {
+  const last = recent[0];
+  if (!last) return null;
+  const inc = t.inc || UP;
+  const top = Math.max(...last.sets.map(s => +s.w || 0));
+  const reps = last.sets.map(s => +s.r);
+  const unit = t.unit === 'steps' ? 'steps' : 'reps';
+  if (t.min == null && t.max == null) {
+    return { kind: 'beat', w: top, from: top, reps, note: `Beat last time: ${sum(reps)} ${unit} in total. Go for one more.` };
+  }
+  const lo = t.min ?? t.max, hi = t.max ?? t.min;
+  const short = p => p.sets.length < t.sets || p.sets.some(x => +x.r < lo);
+  if (last.sets.length >= t.sets && reps.every(r => r >= hi)) {
+    if (!top) return { kind: 'reps', w: 0, from: 0, reps: reps.map(r => r + 1), note: `You hit ${hi} on every set. Add a little weight or slow the reps down.` };
+    const w = round2(top + inc);
+    return { kind: 'up', w, from: top, reps: Array(t.sets).fill(lo), note: `You hit ${hi} on every set last time, so it's up to ${w} lb. Aim for ${lo} or more.` };
+  }
+  if (short(last)) {
+    const prev = recent[1];
+    const prevTop = prev ? Math.max(...prev.sets.map(s => +s.w || 0)) : 0;
+    if (top && prev && short(prev) && prevTop >= top) {
+      const step = inc >= 5 ? 5 : 2.5;
+      const w = Math.max(step, Math.min(top - step, roundTo(top * 0.9, step)));
+      return { kind: 'down', w, from: top, reps: Array(t.sets).fill(hi), note: `Two tough sessions in a row, so it's ${w} lb today. Build back up from here.` };
+    }
+    return { kind: 'hold', w: top, from: top, reps: reps.map(r => Math.max(r, lo)), note: `Stay at ${top ? `${top} lb` : 'bodyweight'} and get ${lo} on every set.` };
+  }
+  return {
+    kind: 'reps', w: top, from: top,
+    reps: Array.from({ length: t.sets }, (_, k) => Math.min(hi, (reps[k] ?? reps[reps.length - 1]) + 1)),
+    note: `Same weight. Go for one more rep per set (top of the range is ${hi}).`,
+  };
 }
 
-// Hit the top of the range on every set last time → suggest the next jump.
-function suggestion(e, last) {
-  const t = e.target;
-  if (!last || t.max == null || last.sets.length < t.sets) return null;
-  if (!last.sets.every(s => +s.r >= t.max)) return null;
-  const top = Math.max(...last.sets.map(s => +s.w || 0));
-  if (!top) return null;
-  return round2(top + (t.inc || UP));
+// Tailor the rest of today's sets to how this one went.
+function adjustRest(e, j) {
+  const t = e.target, s = e.sets[j];
+  if (t.min == null && t.max == null) return '';
+  const lo = t.min ?? t.max, hi = t.max ?? t.min, inc = t.inc || UP, w0 = +s.w;
+  const rest = e.sets.filter((x, k) => k > j && !x.done && +x.w === w0);
+  if (!rest.length || !w0) return '';
+  if (+s.r >= hi + 2) {
+    rest.forEach(x => { x.w = round2(w0 + inc); x.r = lo; });
+    return `Strong set. Next set +${inc} lb.`;
+  }
+  if (+s.r < lo && w0 > inc) {
+    rest.forEach(x => { x.w = round2(w0 - inc); x.r = lo; });
+    return `Under ${lo}. Next set −${inc} lb to stay in range.`;
+  }
+  return '';
 }
 
 function buildSession(dayKey, date) {
@@ -225,10 +282,11 @@ function buildSession(dayKey, date) {
         target: { sets: x.sets, min: x.min, max: x.max, inc: x.inc, unit: x.unit || 'reps', note: x.note || '' },
         sets: [],
       };
-      const last = lastPerf(e.key, w);
+      const plan = coachPlan(e.target, recentPerf(e.key, w, 2));
+      if (plan) e.coach = { kind: plan.kind, note: plan.note, from: plan.from, w: plan.w };
       for (let k = 0; k < x.sets; k++) {
-        const src = last ? (last.sets[k] || last.sets[last.sets.length - 1]) : null;
-        e.sets.push({ w: src ? src.w : '', r: src ? src.r : (x.min ?? x.max ?? ''), done: false });
+        if (plan) e.sets.push({ w: plan.w, r: plan.reps[Math.min(k, plan.reps.length - 1)], done: false });
+        else e.sets.push({ w: '', r: x.min ?? x.max ?? '', done: false });
       }
       w.exercises.push(e);
     }));
@@ -261,18 +319,19 @@ function logSet(w, i, j) {
   s.done = true;
   s.at = Date.now();
   e.sets.forEach((x, k) => { if (k > j && !x.done && x.w === '') x.w = s.w; });
+  const today = w.date === todayStr();
+  const msgs = [];
+  if (today) { const tip = adjustRest(e, j); if (tip) msgs.push(tip); }
   persist(w);
   haptic();
   // In a superset, rest only after the whole round is done.
-  if (w.date === todayStr()) {
+  if (today) {
     const grp = w.exercises.filter(x => x.group === e.group);
     const roundDone = grp.every(x => !x.sets[j] || x.sets[j].done);
     if (roundDone) startTimer(S.settings.restSec);
-    else {
-      const next = grp.find(x => x.sets[j] && !x.sets[j].done);
-      toast(`Next: ${next.name}`);
-    }
+    else msgs.push(`Next: ${grp.find(x => x.sets[j] && !x.sets[j].done).name}`);
   }
+  if (msgs.length) toast(msgs.join(' · '));
   render();
 }
 
@@ -367,7 +426,7 @@ function toast(msg) {
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), msg.length > 30 ? 3200 : 2200);
 }
 
 // ---------- charts ----------
@@ -416,7 +475,7 @@ function barChart(items, target) {
   let out = '';
   items.forEach((it, k) => {
     const x = L + k * bw + bw * 0.15, h = H - B - Y(it.y);
-    out += `<rect class="bar ${it.y >= target ? 'hit' : ''}" x="${x.toFixed(1)}" y="${Y(it.y).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${Math.max(0, h).toFixed(1)}" rx="3"/>`;
+    out += `<rect class="bar ${it.y >= (it.t ?? target) ? 'hit' : ''}" x="${x.toFixed(1)}" y="${Y(it.y).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${Math.max(0, h).toFixed(1)}" rx="3"/>`;
     if (k % 2 === items.length % 2 || k === items.length - 1) {
       out += `<text class="xlab" x="${(x + bw * 0.35).toFixed(1)}" y="${H - 6}" text-anchor="middle">${it.label}</text>`;
     }
@@ -480,7 +539,7 @@ function sessionStrength(w) {
   });
   const cards = groups.map(g => {
     const multi = g.items.length > 1;
-    const up = g.items.some(i => suggestion(w.exercises[i], lastPerf(w.exercises[i].key, w)));
+    const up = g.items.some(i => (w.exercises[i].coach || {}).kind === 'up');
     const inner = g.items.map((i, k) => exBlock(w, i, multi ? String.fromCharCode(65 + k) : '')).join('');
     return `<section class="card ${multi ? 'ss' : ''} ${up ? 'up' : ''}">
       ${multi ? '<div class="ss-tag">Superset <span>· alternate, rest after the round</span></div>' : ''}
@@ -499,13 +558,14 @@ function sessionStrength(w) {
 function exBlock(w, i, letter) {
   const e = w.exercises[i];
   const last = lastPerf(e.key, w);
-  const sug = suggestion(e, last);
+  const c = e.coach;
   const unit = e.target.unit === 'steps' ? 'steps' : 'reps';
   const lastTxt = last
     ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>`
     : 'First time logging this. Enter a weight to start.';
-  const banner = sug ? `<div class="up-banner"><span>▲ You hit the top of the range. Try <b>${sug} lb</b> (+${e.target.inc}).</span>
-      ${e.sets.some(s => !s.done && +s.w !== sug) ? `<button data-a="use-sug" data-wid="${w.id}" data-ex="${i}" data-w="${sug}">Use</button>` : ''}</div>` : '';
+  const canKeep = c && (c.kind === 'up' || c.kind === 'down') && e.sets.some(s => !s.done && +s.w === c.w);
+  const banner = c ? `<div class="coach coach-${c.kind}"><span>${COACH_MARK[c.kind] || '→'} ${esc(c.note)}</span>
+      ${canKeep ? `<button data-a="keep-w" data-wid="${w.id}" data-ex="${i}">Keep ${c.from}</button>` : ''}</div>` : '';
   const rows = e.sets.map((s, j) => `
     <div class="set ${s.done ? 'done' : ''}">
       <span class="set-no">${j + 1}</span>
@@ -687,25 +747,71 @@ function viewWorkout() {
 
 // ----- Body -----
 function bodyEntry(date) {
-  return S.body[date] || { date, weight: null, protein: 0, adds: [] };
+  const b = S.body[date] || { date, weight: null, protein: 0 };
+  if (!b.items) b.items = (b.adds || []).map(g => ({ name: '', g }));
+  return b;
 }
 function saveBody(b) {
+  delete b.adds;
+  b.protein = sum(b.items.map(x => +x.g || 0));
   S.body[b.date] = b;
   DB.put('body', b);
+}
+function latestWeighIn(date) {
+  return Object.values(S.body).filter(x => x.date <= date && x.weight != null).sort((a, c) => c.date.localeCompare(a.date))[0] || null;
+}
+function proteinTargetFor(date) {
+  if (S.settings.proteinMode === 'auto') {
+    const b = latestWeighIn(date);
+    if (b) return Math.round(b.weight * S.settings.proteinPerLb / 5) * 5;
+  }
+  return S.settings.proteinTarget;
+}
+
+// Saved foods: everything you've typed in. Starred ones stay as favorites.
+const saveFoods = () => DB.put('kv', { k: 'foods', v: S.foods });
+const findFood = name => S.foods.find(f => keyOf(f.name) === keyOf(name));
+function rememberFood(name, g) {
+  let f = findFood(name);
+  if (!f) { f = { name, g, fav: false, used: 0 }; S.foods.push(f); }
+  f.name = name; f.g = g; f.used++; f.last = Date.now();
+  saveFoods();
+}
+function addFood(name, g) {
+  const b = bodyEntry(S.bodyDate);
+  b.items = [...b.items, { name, g, at: Date.now() }];
+  saveBody(b);
+  if (name) rememberFood(name, g);
+  haptic();
+  render();
 }
 
 function viewBody() {
   const date = S.bodyDate, today = todayStr();
   const b = bodyEntry(date);
-  const target = S.settings.proteinTarget;
+  const target = proteinTargetFor(date);
   const pct = Math.min(100, (b.protein / target) * 100);
   const prevW = Object.values(S.body).filter(x => x.date < date && x.weight != null).sort((a, c) => c.date.localeCompare(a.date))[0];
   const diff = (b.weight != null && prevW) ? Math.round((b.weight - prevW.weight) * 10) / 10 : null;
   const left = target - b.protein;
+  const wi = latestWeighIn(date);
+  const why = S.settings.proteinMode !== 'auto' ? 'Fixed target. You can change it in More.'
+    : wi ? `${S.settings.proteinPerLb} g × ${wi.weight} lb bodyweight${wi.date !== date ? ` (weighed ${esc(fmtDate(wi.date, { month: 'short', day: 'numeric' }))})` : ''}`
+    : 'Log your weight above and the target follows it.';
+
+  const favs = S.foods.filter(f => f.fav).sort((a, c) => a.name.localeCompare(c.name));
+  const recent = S.foods.filter(f => !f.fav).sort((a, c) => (c.last || 0) - (a.last || 0)).slice(0, 8);
+  const foodBtn = f => `<div class="food">
+      <button class="food-add" data-a="food-quick" data-n="${esc(f.name)}"><b>${esc(f.name)}</b><span>+${f.g} g</span></button>
+      <button class="food-star ${f.fav ? 'on' : ''}" data-a="food-fav" data-n="${esc(f.name)}" aria-label="${f.fav ? 'Remove from favorites' : 'Add to favorites'}">${f.fav ? '★' : '☆'}</button>
+    </div>`;
+  const eaten = b.items.map((x, k) => `<div class="row">
+      <div><b>${esc(x.name || 'Quick add')}</b></div><span class="val">${x.g} g</span>
+      <button class="icon-btn" data-a="item-rm" data-i="${k}" aria-label="Remove">${ic('x')}</button></div>`).join('');
 
   const weights = Object.values(S.body).filter(x => x.weight != null).sort((a, c) => a.date.localeCompare(c.date)).slice(-120);
   const days14 = Array.from({ length: 14 }, (_, k) => addDays(today, k - 13));
-  const hits = days14.slice(-7).filter(d => bodyEntry(d).protein >= target).length;
+  const hits = days14.slice(-7).filter(d => bodyEntry(d).protein >= proteinTargetFor(d)).length;
 
   return `
     <header class="top"><h1>Body</h1></header>
@@ -725,18 +831,28 @@ function viewBody() {
       <label class="lbl">Protein</label>
       <div class="big-num">${b.protein}<small> / ${target} g</small></div>
       <div class="prog ${b.protein >= target ? 'hit' : ''}"><div style="width:${pct}%"></div></div>
-      <div class="muted small" style="margin:-6px 0 12px">${left > 0 ? `${left} g to go` : 'Target hit. Nice.'}</div>
-      <div class="quick">${[10, 20, 25, 30, 40, 50].map(n => `<button data-a="p-add" data-n="${n}">+${n}</button>`).join('')}</div>
-      <div class="inline-add">
-        <input class="inp" id="p-custom" inputmode="numeric" placeholder="Other amount (g)">
-        <button class="btn" data-a="p-custom">Add</button>
-      </div>
-      ${b.adds.length ? `<button class="linkbtn" data-a="p-undo">Undo last (+${b.adds[b.adds.length - 1]} g)</button>` : ''}
+      <div class="muted small" style="margin-top:-6px">${left > 0 ? `${left} g to go` : 'Target hit. Nice.'}</div>
+      <div class="sh-hint">Target: ${why}</div>
     </div>
+
+    <div class="card">
+      <label class="lbl" for="food-name">Add what you ate</label>
+      <div class="food-form">
+        <input class="inp" id="food-name" placeholder="e.g. 3 eggs" autocomplete="off">
+        <input class="inp" id="food-g" inputmode="numeric" placeholder="g">
+      </div>
+      <button class="btn pri block" style="margin-top:8px" data-a="food-form">Add protein</button>
+      ${favs.length ? `<label class="lbl">Favorites</label>${favs.map(foodBtn).join('')}` : ''}
+      ${recent.length ? `<label class="lbl">Recent</label>${recent.map(foodBtn).join('')}<div class="sh-hint">Tap ☆ to keep one as a favorite.</div>` : ''}
+      <label class="lbl">Quick add</label>
+      <div class="quick">${[10, 20, 25, 30, 40, 50].map(n => `<button data-a="p-add" data-n="${n}">+${n}</button>`).join('')}</div>
+    </div>
+
+    ${eaten ? `<h2>Eaten ${date === today ? 'today' : 'this day'}</h2><div class="card flush">${eaten}</div>` : ''}
 
     <h2>Protein · last 14 days</h2>
     <div class="card">
-      ${barChart(days14.map(d => ({ label: parseYmd(d).getDate(), y: bodyEntry(d).protein })), target)}
+      ${barChart(days14.map(d => ({ label: parseYmd(d).getDate(), y: bodyEntry(d).protein, t: proteinTargetFor(d) })), proteinTargetFor(today))}
       <div class="muted small" style="margin-top:6px">Target hit on ${hits} of the last 7 days.</div>
     </div>
 
@@ -786,7 +902,7 @@ function viewStats() {
   const setsWeek = sum(thisWeek.map(w => sum((w.exercises || []).map(e => doneSets(e).length))));
   const cardioMin = sum(thisWeek.map(w => sum((w.activities || []).map(a => +a.min || 0))));
   const soFar = Array.from({ length: 7 }, (_, k) => addDays(ws, k)).filter(d => d <= today);
-  const protHits = soFar.filter(d => bodyEntry(d).protein >= S.settings.proteinTarget).length;
+  const protHits = soFar.filter(d => bodyEntry(d).protein >= proteinTargetFor(d)).length;
 
   const rows = weeks.slice(-12).reverse().map(x => `
     <div class="wk ${full(x) ? 'full' : ''}">
@@ -816,7 +932,7 @@ function viewStats() {
 
 // ----- More (program + settings) -----
 function viewMore() {
-  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  const standalone = isStandalone();
   const typeName = { strength: 'Lifting', cardio: 'Cardio/yoga', rest: 'Rest' };
   const days = DAYS.map(d => {
     const day = S.program.days[d];
@@ -844,14 +960,8 @@ function viewMore() {
       <div class="sh-hint">Starts by itself after each set (after each round in a superset). iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
     </div>
 
-    <h2>Protein target</h2>
-    <div class="card">
-      <div class="stepper three">
-        <button class="st-btn" data-a="set-prot" data-d="-5">−5</button>
-        <div class="st-inp" style="display:grid;place-items:center">${S.settings.proteinTarget} g</div>
-        <button class="st-btn" data-a="set-prot" data-d="5">+5</button>
-      </div>
-    </div>
+    ${proteinCard()}
+    ${reminderCard()}
 
     <h2>Backup</h2>
     <div class="card">
@@ -867,6 +977,51 @@ function viewMore() {
       <div class="sh-hint">Only resets the exercises and days. Your logged history stays.</div>
     </div>
     <div class="foot">Lift Log ${APP_VERSION} · works offline · no account</div>`;
+}
+
+function proteinCard() {
+  const auto = S.settings.proteinMode === 'auto';
+  const today = todayStr(), wi = latestWeighIn(today);
+  return `<h2>Protein target</h2>
+    <div class="card">
+      <div class="seg">
+        <button class="${auto ? 'on' : ''}" data-a="prot-mode" data-v="auto">Follows weight</button>
+        <button class="${auto ? '' : 'on'}" data-a="prot-mode" data-v="fixed">Fixed</button>
+      </div>
+      ${auto ? `<label class="lbl">Grams per pound of bodyweight</label>
+      <div class="stepper three">
+        <button class="st-btn" data-a="set-perlb" data-d="-0.05">−</button>
+        <div class="st-inp" style="display:grid;place-items:center">${S.settings.proteinPerLb.toFixed(2)} g</div>
+        <button class="st-btn" data-a="set-perlb" data-d="0.05">+</button>
+      </div>
+      <div class="sh-hint">${wi ? `Today's target is ${proteinTargetFor(today)} g, from your ${wi.weight} lb weigh-in.` : `Log your weight on the Body tab and the target follows it. Until then it's ${S.settings.proteinTarget} g.`} Rounded to the nearest 5 g. A common range for lifting is 0.7 to 1 g per pound.</div>`
+      : `<label class="lbl">Grams per day</label>
+      <div class="stepper three">
+        <button class="st-btn" data-a="set-prot" data-d="-5">−5</button>
+        <div class="st-inp" style="display:grid;place-items:center">${S.settings.proteinTarget} g</div>
+        <button class="st-btn" data-a="set-prot" data-d="5">+5</button>
+      </div>`}
+    </div>`;
+}
+
+function reminderCard() {
+  const r = S.settings.reminder;
+  const can = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  let body;
+  if (!isStandalone() && /iPhone|iPad/.test(navigator.userAgent)) {
+    body = `<div class="muted small">Open Lift Log from your Home Screen icon to turn this on. iPhone only allows notifications for installed web apps.</div>`;
+  } else if (!can) {
+    body = `<div class="muted small">This browser can't show notifications. On iPhone you need iOS 16.4 or newer and the Home Screen app.</div>`;
+  } else {
+    body = `<label class="lbl" for="rem-time">Time</label>
+      <input class="inp" type="time" id="rem-time" value="${r.time}" style="font-size:22px;font-weight:700">
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn ${r.on ? '' : 'pri'}" data-a="${r.on ? 'rem-off' : 'rem-on'}">${r.on ? 'Turn off' : 'Turn on'}</button>
+        ${r.on ? '<button class="btn" data-a="rem-test">Send a test</button>' : ''}
+      </div>
+      <div class="sh-hint">${r.on ? `On: every day at ${fmtTime(r.time)}. ` : ''}It skips days you've already logged your weight.</div>`;
+  }
+  return `<h2>Weigh-in reminder</h2><div class="card">${body}</div>`;
 }
 
 function viewProgDay() {
@@ -991,12 +1146,56 @@ function exSheetHTML() {
     </div>`;
 }
 
+// ---------- weigh-in reminder ----------
+const isStandalone = () => navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+const fmtTime = t => { const [h, m] = t.split(':').map(Number); return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
+const b64uBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), ch => ch.charCodeAt(0));
+
+async function pushApi(path, body) {
+  const res = await fetch(`${PUSH_URL}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `server said ${res.status}`);
+  return data;
+}
+async function reminderSync() {
+  const r = S.settings.reminder;
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(VAPID_PUBLIC) });
+  r.id = r.id || uid('r');
+  await pushApi('subscribe', { id: r.id, sub: sub.toJSON(), time: r.time, tz: Intl.DateTimeFormat().resolvedOptions().timeZone });
+}
+async function reminderOn() {
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Notifications are off for Lift Log. Turn them on in iPhone Settings → Notifications.'); return; }
+    await reminderSync();
+    S.settings.reminder.on = true;
+    saveSettings(); render();
+    toast(`Reminder set for ${fmtTime(S.settings.reminder.time)} every day`);
+  } catch (err) {
+    toast(`Couldn't turn it on: ${err.message}`);
+  }
+}
+async function reminderOff() {
+  const r = S.settings.reminder;
+  r.on = false;
+  saveSettings(); render();
+  toast('Reminder off');
+  try { if (r.id) await pushApi('unsubscribe', { id: r.id }); } catch (err) { /* offline: the server drops it once pushes start failing */ }
+  try { const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (sub) await sub.unsubscribe(); } catch (err) { /* ignore */ }
+}
+function reminderWeighed() {
+  const r = S.settings.reminder;
+  if (r.on && r.id) pushApi('weighed', { id: r.id }).catch(() => {});
+}
+
 // ---------- backup ----------
 async function exportData() {
   const data = {
     app: 'liftlog', version: 1, exportedAt: new Date().toISOString(),
     program: S.program, settings: S.settings, workouts: S.workouts,
-    body: Object.values(S.body),
+    body: Object.values(S.body), foods: S.foods,
   };
   const name = `lift-log-backup-${todayStr()}.json`;
   const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
@@ -1031,6 +1230,7 @@ async function importData(f) {
   await DB.put('kv', { k: 'settings', v: { ...DEFAULT_SETTINGS, ...(data.settings || {}) } });
   await DB.putMany('workouts', data.workouts);
   await DB.putMany('body', data.body || []);
+  await DB.put('kv', { k: 'foods', v: data.foods || [] });
   await loadState();
   S.view = null;
   S.pickDay = null;
@@ -1053,10 +1253,10 @@ const ACT = {
 
   tick: d => tick(getW(d.wid), +d.ex, +d.s),
   'edit-set': d => openSetSheet(getW(d.wid), +d.ex, +d.s),
-  'use-sug': d => {
-    const w = getW(d.wid);
-    w.exercises[+d.ex].sets.forEach(s => { if (!s.done) s.w = +d.w; });
-    persist(w); render(); toast(`Set to ${d.w} lb`);
+  'keep-w': d => {
+    const w = getW(d.wid), e = w.exercises[+d.ex], c = e.coach;
+    e.sets.forEach(s => { if (!s.done && +s.w === c.w) s.w = c.from; });
+    persist(w); render(); toast(`Keeping ${c.from} lb`);
   },
   'add-set': d => {
     const w = getW(d.wid), e = w.exercises[+d.ex];
@@ -1169,34 +1369,36 @@ const ACT = {
     if (n > todayStr()) return;
     S.bodyDate = n; render();
   },
-  'p-add': d => addProtein(+d.n),
-  'p-custom': () => {
-    const n = num($('#p-custom').value);
-    if (!n || n <= 0) { toast('Enter grams to add'); return; }
-    addProtein(Math.round(n));
+  'p-add': d => addFood('', +d.n),
+  'food-form': () => {
+    const name = $('#food-name').value.trim(), g = num($('#food-g').value);
+    if (!g || g <= 0) { toast('Enter the grams of protein'); $('#food-g').focus(); return; }
+    addFood(name, Math.round(g));
+    toast(name ? `Added ${name}` : `Added ${Math.round(g)} g`);
   },
-  'p-undo': () => {
+  'food-quick': d => { const f = findFood(d.n); if (f) { addFood(f.name, f.g); toast(`Added ${f.name}`); } },
+  'food-fav': d => { const f = findFood(d.n); if (f) { f.fav = !f.fav; saveFoods(); render(); } },
+  'item-rm': d => {
     const b = bodyEntry(S.bodyDate);
-    b.adds.pop();
-    b.protein = sum(b.adds);
+    b.items.splice(+d.i, 1);
     saveBody(b); render();
   },
 
   'set-rest': d => { S.settings.restSec = Math.max(15, Math.min(600, S.settings.restSec + +d.d)); saveSettings(); render(); },
+  'prot-mode': d => { S.settings.proteinMode = d.v; saveSettings(); render(); },
+  'set-perlb': d => { S.settings.proteinPerLb = Math.max(0.5, Math.min(1.5, round2(S.settings.proteinPerLb + +d.d))); saveSettings(); render(); },
+  'rem-on': () => reminderOn(),
+  'rem-off': () => reminderOff(),
+  'rem-test': () => {
+    pushApi('test', { id: S.settings.reminder.id })
+      .then(() => toast('Sending in 5 seconds. Go to your Home Screen to see it.'))
+      .catch(err => toast(`Couldn't send: ${err.message}`));
+  },
   'set-prot': d => { S.settings.proteinTarget = Math.max(5, S.settings.proteinTarget + +d.d); saveSettings(); render(); },
   'set-sound': () => { S.settings.sound = !S.settings.sound; saveSettings(); render(); if (S.settings.sound) beep(); },
   export: () => exportData(),
   import: () => $('#import-file').click(),
 };
-
-function addProtein(n) {
-  const b = bodyEntry(S.bodyDate);
-  b.adds = [...b.adds, n];
-  b.protein = sum(b.adds);
-  saveBody(b);
-  haptic();
-  render();
-}
 
 function setPath(obj, path, val) {
   const parts = path.split('.');
@@ -1233,7 +1435,14 @@ document.addEventListener('change', ev => {
     const b = bodyEntry(S.bodyDate);
     b.weight = num(el.value);
     saveBody(b);
+    if (S.bodyDate === todayStr() && b.weight != null) reminderWeighed();
     render();
+  } else if (el.id === 'rem-time' && el.value) {
+    const r = S.settings.reminder;
+    r.time = el.value;
+    saveSettings();
+    if (r.on) reminderSync().then(() => toast(`Reminder moved to ${fmtTime(r.time)}`)).catch(err => toast(`Couldn't update: ${err.message}`));
+    else render();
   } else if (el.id === 'import-file') {
     importData(el.files[0]);
     el.value = '';
@@ -1244,7 +1453,7 @@ document.addEventListener('change', ev => {
   }
 });
 document.addEventListener('keydown', ev => {
-  if (ev.key === 'Enter' && ev.target.id === 'p-custom') ACT['p-custom']();
+  if (ev.key === 'Enter' && (ev.target.id === 'food-name' || ev.target.id === 'food-g')) ACT['food-form']();
   if (ev.key === 'Enter' && ev.target.dataset && ev.target.dataset.ssf) ACT['ss-save']();
 });
 document.addEventListener('visibilitychange', () => {
@@ -1265,7 +1474,17 @@ document.addEventListener('visibilitychange', () => {
     $('#view').innerHTML = `<div class="card empty"><b>Storage isn't available</b>${esc(err.message)}. Private browsing can block it.</div>`;
     return;
   }
+  if (location.hash === '#body') {
+    S.tab = 'body';
+    history.replaceState(null, '', location.pathname);
+  }
   render();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', ev => {
+      if (ev.data && ev.data.open) { S.tab = ev.data.open; S.view = null; S.bodyDate = todayStr(); closeSheet(); render(); scrollTo(0, 0); }
+    });
+  }
+  if (S.settings.reminder.on && navigator.onLine) reminderSync().catch(() => {});
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }

@@ -1,0 +1,18 @@
+# The weigh-in reminder server (see worker.js). Deploy from this folder with: npx wrangler deploy
+name = "liftlog-push"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# check for due reminders every 15 minutes
+[triggers]
+crons = ["*/15 * * * *"]
+
+# where reminder times and push addresses are kept
+[[kv_namespaces]]
+binding = "SUBS"
+id = "18fa5673213d42d581dc64b13796bf6c"
+
+# the private half of the key is a secret: npx wrangler secret put VAPID_PRIVATE_JWK
+[vars]
+VAPID_PUBLIC = "BA_437YE5zeBtTMqdI9k9Ek1Jl9qu4Bo9Hmuen9bQmLNGn0MwZUngKJpCJSVXwj1lDQeCmGnbmKQ1zVhWV8yZLc"
+VAPID_SUBJECT = "https://adewyn.github.io/liftlog/"

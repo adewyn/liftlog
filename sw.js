@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v1';
+const CACHE = 'liftlog-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -40,4 +40,23 @@ self.addEventListener('fetch', e => {
       || (req.mode === 'navigate' ? await caches.match('./index.html') : null);
     return hit || (await fresh) || new Response('Offline', { status: 503 });
   })());
+});
+
+// Daily weigh-in reminder from the push server. The push carries no data, so the text lives here.
+self.addEventListener('push', e => {
+  e.waitUntil(self.registration.showNotification('Time to weigh in', {
+    body: 'Step on the scale and log it in Lift Log.',
+    icon: 'icons/icon-192.png',
+    tag: 'weigh-in',
+    data: { url: './#body' },
+  }));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const open = list.find(c => 'focus' in c);
+    if (open) { open.postMessage({ open: 'body' }); return open.focus(); }
+    return self.clients.openWindow('./#body');
+  }));
 });

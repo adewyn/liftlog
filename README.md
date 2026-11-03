@@ -27,4 +27,5 @@ Only the app's code is public. Your workouts never leave your phone.
 - **Always use the Home Screen icon.** On iPhone, the icon and a Safari tab keep separate data.
 - **Back up now and then:** More → Export backup, then save the file to iCloud Drive or Files. Deleting the icon deletes its data.
 - **Rest timer alerts:** iPhone doesn't let web apps vibrate, so the timer beeps and flashes green. Keep the app open on screen and your ringer on.
+- **Weigh-in reminder:** More → Weigh-in reminder → Turn on (from the Home Screen icon). It uses a tiny free server in `server/push` on Cloudflare that only stores your phone's notification address and reminder time.
 - **Updates:** after a new version is uploaded, the app picks it up on the second launch. When you change the code, change `liftlog-v1` in `sw.js` to a new number.
