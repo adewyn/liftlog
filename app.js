@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -461,7 +461,8 @@ function fillSets(e, w) {
   const extra = deload && !cb ? `Deload week: ${Math.ceil(sets / 2) === 1 ? '1 set' : `${Math.ceil(sets / 2)} sets`}${plan ? " at last time's weights" : ''}, about 3 reps left in the tank.`
     : low ? '2 sets today. Stop each one with 2 or 3 reps left in the tank.' : '';
   if (extra && (!plan || (deload && !cb))) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
-  const cue = rehab ? REHAB_CUE : care ? CARE_CUES[care] : '';
+  const helps = soreHelpers(e.name, w.date);
+  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', helps ? `Your sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here, so go lighter and stop if it pulls.` : ''].filter(Boolean).join(' ');
   if (cue) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${cue}`.trim() } : { kind: 'hold', note: cue, from: 0, w: 0, prev: null };
   const n = deload && !cb ? Math.ceil(sets / 2) : low ? Math.min(2, sets) : sets;
   const done = e.sets.filter(s => s.done);
@@ -514,6 +515,7 @@ function buildSession(dayKey, date) {
   if (day.type === 'strength') {
     w.exercises = [];
     (day.groups || []).forEach((g, gi) => g.forEach(x => w.exercises.push(sessionExercise(x, gi, w))));
+    applySore(w);
   }
   return w;
 }
@@ -534,6 +536,7 @@ function todaySession() {
   if (w.planKey !== key) {
     if (w.type === 'strength') w.deload = deloadState(date).active;
     (w.exercises || []).forEach(e => { if (!e.sets.some(x => x.done)) fillSets(e, w); });
+    if (w.type === 'strength') applySore(w);
     w.planKey = key;
     if (found) persist(w);
   }
@@ -544,7 +547,7 @@ const sleepShort = date => sleepFor(date) != null && sleepFor(date) < 6;
 // Two nights of 6 hours or less in a row count like a low-energy day.
 const twoShortNights = date => [date, addDays(date, -1)].every(d => sleepFor(d) != null && sleepFor(d) <= 6);
 const lowDay = date => energyFor(date) === 'low' || twoShortNights(date);
-const planKeyFor = date => `${energyFor(date) || ''}|${sleepShort(date) ? 's' : ''}|${twoShortNights(date) ? 't' : ''}|${deloadState(date).active ? 'd' : ''}|${JSON.stringify(S.settings.care || {})}`;
+const planKeyFor = date => `${energyFor(date) || ''}|${sleepShort(date) ? 's' : ''}|${twoShortNights(date) ? 't' : ''}|${deloadState(date).active ? 'd' : ''}|${JSON.stringify(S.settings.care || {})}|${soreFor(date).join(',')}`;
 
 // ----- weekly sets per muscle -----
 // Direct work counts as a full set, big helpers as half (a bench set is 1 chest, ½ triceps).
@@ -578,6 +581,70 @@ const MUSCLE_RULES = [
   [/bench|chest press|\bdips?\b|push-?up|incline|decline|floor press|free press|machine press|d(umb)?b(ell)? press|dumbbell chest/i, { chest: 1, triceps: 0.5 }],
 ];
 const musclesOf = name => { const n = normName(name); return (MUSCLE_RULES.find(([re]) => re.test(n)) || [null, {}])[1]; };
+
+// ----- too sore today -----
+// Pick what's sore and today's lifts work around it: lifts aimed at it sit out (until you un-pick it),
+// lifts it only helps with stay but go lighter, and lifts for muscles that are behind this week fill in.
+const SORE_GROUPS = { chest: ['Chest', ['chest']], back: ['Back', ['back']], shoulders: ['Shoulders', ['shoulders', 'rear']], arms: ['Arms', ['biceps', 'triceps']], legs: ['Legs', ['quads', 'hams', 'glutes', 'calves']], core: ['Core', ['abs']] };
+const soreFor = date => ((S.body[date] || {}).sore || []).filter(g => SORE_GROUPS[g]);
+const soreMuscles = date => soreFor(date).flatMap(g => SORE_GROUPS[g][1]);
+const soreHit = (name, ms) => sum(ms.map(m => musclesOf(name)[m] || 0));
+function soreHelpers(name, date) {
+  const ms = soreMuscles(date), hit = soreHit(name, ms);
+  if (!hit || hit >= 1) return '';
+  const names = ms.filter(m => musclesOf(name)[m]).map(m => MUSCLES[m].toLowerCase());
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+}
+function applySore(w) {
+  const ms = soreMuscles(w.date), started = e => e.sets.some(x => x.done);
+  w.soreOut = w.soreOut || [];
+  // Start over each time: drop fill-ins not started yet and bring back lifts that aren't sore any more.
+  w.exercises = w.exercises.filter(e => !e.soreAdd || started(e));
+  w.soreOut = w.soreOut.filter(e => {
+    if (soreHit(e.name, ms) >= 1) return true;
+    fillSets(e, w);
+    w.exercises.splice(Math.min(e.at ?? w.exercises.length, w.exercises.length), 0, e);
+    return false;
+  });
+  w.exercises = w.exercises.filter((e, i) => {
+    if (started(e) || soreHit(e.name, ms) < 1) return true;
+    w.soreOut.push({ ...e, at: i });
+    return false;
+  });
+  w.soreOut.forEach(e => { delete e.soreAdd; });
+  if (!w.soreOut.length) return;
+  // Fill in with lifts from your other workouts for muscles that aren't sore, most behind this week first.
+  const have = new Set([...w.exercises, ...w.soreOut].map(e => e.key));
+  const vol = weeklyVolume(weekStart(w.date)), need = {};
+  vol.forEach(v => { need[v.m] = v.goal - v.done; });
+  w.exercises.forEach(e => Object.entries(musclesOf(e.name)).forEach(([m, f]) => { need[m] -= f * e.sets.length; }));
+  const y = addDays(w.date, -1), worked = new Set();
+  S.workouts.filter(x => x.date === y).forEach(x => (x.exercises || []).forEach(e => { if (doneSets(e).length) Object.entries(musclesOf(e.name)).forEach(([m, f]) => { if (f >= 1) worked.add(m); }); }));
+  const main = name => Object.entries(musclesOf(name)).sort((a, b) => b[1] - a[1])[0];
+  const pool = [], seen = new Set();
+  allPlans().filter(p => p && p.type === 'strength').forEach(p => (p.groups || []).forEach(g => g.forEach(x => {
+    const k = keyOf(x.name), m = main(x.name);
+    if (!m || m[1] < 1 || seen.has(k) || have.has(k) || REHAB_WORDS.test(x.name) || soreHit(x.name, ms) > 0 || worked.has(m[0])) return;
+    seen.add(k);
+    pool.push({ x, m: m[0], score: need[m[0]] + (recentPerf(k, w, 1).length ? 0.5 : 0) });
+  })));
+  pool.sort((a, b) => b.score - a.score);
+  const picks = [], used = new Set();
+  pool.forEach(c => { if (picks.length < Math.min(3, w.soreOut.length) && !used.has(c.m)) { used.add(c.m); picks.push(c.x); } });
+  let gid = Math.max(0, ...w.exercises.map(e => +e.group || 0)) + 1;
+  picks.forEach(x => { const e = sessionExercise(x, gid++, w); e.soreAdd = true; w.exercises.push(e); });
+}
+function soreCard(w) {
+  const allDone = w.exercises.length && w.exercises.every(e => e.sets.every(x => x.done));
+  if (w.type !== 'strength' || w.date !== todayStr() || allDone) return '';
+  const on = soreFor(w.date), out = w.soreOut || [], add = w.exercises.filter(e => e.soreAdd);
+  return `<div class="card sore-card">
+    <div class="lbl" style="margin-top:0">Too sore for something today?</div>
+    <div class="chips">${Object.entries(SORE_GROUPS).map(([k, [n]]) => `<button class="chip ${on.includes(k) ? 'on' : ''}" data-a="sore-tog" data-g="${k}">${n}</button>`).join('')}</div>
+    ${on.length ? `<div class="sh-hint">${out.length ? `Sitting out: <b>${out.map(e => esc(e.name)).join(', ')}</b>.` : 'Nothing today works that hard.'}${add.length ? ` Added: <b>${add.map(e => esc(e.name)).join(', ')}</b>, for muscles that are behind this week.` : ''} Tap again to undo.</div>`
+      : '<div class="sh-hint">Pick it, and today\'s lifts for it sit out while other muscles fill in.</div>'}
+  </div>`;
+}
 function weeklyVolume(ws) {
   const planned = {}, done = {};
   Object.keys(MUSCLES).forEach(m => { planned[m] = 0; done[m] = 0; });
@@ -1396,6 +1463,7 @@ function viewToday() {
     ${weekChips(date)}
     <button class="linkbtn diff-btn ${custom ? 'on' : ''}" data-a="pick-other">${custom ? '✓ Doing a different workout · change' : '+ Different workout (saved or blank)'}</button>
     <div id="work"></div>
+    ${soreCard(w)}
     ${sessionBody(w)}`;
 }
 
@@ -2826,6 +2894,7 @@ function cleanBackup(d) {
   (d.body || []).forEach(b => {
     if (b.weight != null) b.weight = n(b.weight) === '' ? null : n(b.weight);
     if (b.steps != null) b.steps = n(b.steps) === '' ? null : n(b.steps);
+    if (b.sore != null) b.sore = Array.isArray(b.sore) ? b.sore.filter(g => SORE_GROUPS[g]) : [];
     b.items = (Array.isArray(b.items) ? b.items : []).map(x => ({ ...x, g: n(x.g) || 0 }));
   });
   d.foods = (Array.isArray(d.foods) ? d.foods : []).map(f => ({ ...f, g: n(f.g) || 0 }));
@@ -3322,6 +3391,11 @@ const ACT = {
     const w = getW(d.wid), at = Date.parse(`${w.date}T12:00`);
     w.exercises.forEach(e => e.sets.forEach((x, k) => { if (!x.done && x.w !== '' && x.r !== '') { x.done = true; x.at = at + k; } }));
     persist(w); render(); toast('Logged.');
+  },
+  'sore-tog': d => {
+    const b = bodyEntry(todayStr()), cur = soreFor(b.date);
+    b.sore = cur.includes(d.g) ? cur.filter(g => g !== d.g) : [...cur, d.g];
+    saveBody(b); haptic(); render();
   },
   'short-version': d => {
     const w = getW(d.wid), before = w.exercises;
