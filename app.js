@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.5.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1381,6 +1381,10 @@ let hapEl = null;
 function haptic() {
   try {
     if (navigator.vibrate) { navigator.vibrate(12); return; }
+    // iPhone's buzz comes from tapping a hidden switch, and that tap pulls focus out of whatever
+    // you're typing in (the keyboard drops and the sheet jumps). While you type, skip the buzz.
+    const a = document.activeElement;
+    if (a && a.matches('input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable]')) return;
     if (!hapEl) {
       hapEl = document.createElement('label');
       hapEl.setAttribute('aria-hidden', 'true');
