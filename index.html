@@ -18,13 +18,15 @@
   <main id="view"></main>
 
   <div id="timer" hidden>
-    <div class="tm-bar"><div class="tm-fill" id="tm-fill"></div></div>
-    <div class="tm-row">
-      <button class="tm-btn" data-a="tm-add" data-d="-15" aria-label="15 seconds less">−15</button>
-      <div class="tm-time"><small id="tm-label">Rest</small><span id="tm-left">1:30</span></div>
-      <button class="tm-btn" data-a="tm-add" data-d="15" aria-label="15 seconds more">+15</button>
+    <div class="tm-ctl">
+      <button class="tm-btn tm-adj" data-a="tm-add" data-d="-15" aria-label="15 seconds less">−15</button>
+      <button class="tm-btn tm-adj" data-a="tm-add" data-d="15" aria-label="15 seconds more">+15</button>
       <button class="tm-btn tm-skip" data-a="tm-stop">Skip</button>
     </div>
+    <button class="tm-pill" data-a="tm-toggle" aria-label="Rest timer. Tap for more options.">
+      <svg class="tm-ring" viewBox="0 0 44 44" aria-hidden="true"><circle class="tm-track" cx="22" cy="22" r="19"/><circle class="tm-prog" id="tm-prog" cx="22" cy="22" r="19" pathLength="100"/></svg>
+      <span class="tm-time"><small id="tm-label">Rest</small><span id="tm-left">1:30</span></span>
+    </button>
   </div>
 
   <nav id="tabs">

@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.4.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -818,7 +818,7 @@ function logSet(w, i, j) {
     const grp = w.exercises.filter(x => x.group === e.group);
     const roundDone = grp.every(x => !x.sets[j] || x.sets[j].done);
     if (roundDone) startTimer(restFor(w, e) + ((say && say.rest) || 0));
-    else toast(`Next: ${grp.find(x => x.sets[j] && !x.sets[j].done).name}`);
+    else { startTimer(0, true); toast(`Next: ${grp.find(x => x.sets[j] && !x.sets[j].done).name}`); }
   }
   render();
 }
@@ -1172,15 +1172,21 @@ function liveSig() {
 }
 
 // ---------- rest timer ----------
-const T = { end: 0, total: 0, iv: null, doneAt: 0 };
-function startTimer(sec) {
-  T.total = sec;
+// A small timer in the corner after every set. Rest counts down; partway through a superset round it
+// counts up instead (no alarm), so you can see how long you've taken to switch.
+const T = { end: 0, total: 0, iv: null, doneAt: 0, up: false, start: 0, openT: null };
+function startTimer(sec, up = false) {
+  T.total = sec; T.up = up; T.start = Date.now();
   T.end = Date.now() + sec * 1000;
   T.doneAt = 0;
   clearInterval(T.iv);
   T.iv = setInterval(drawTimer, 250);
-  $('#timer').hidden = false;
-  $('#timer').classList.remove('done');
+  const el = $('#timer');
+  const fresh = el.hidden;
+  el.hidden = false;
+  el.classList.remove('done', 'open');
+  el.classList.toggle('up', up);
+  if (fresh) { el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop'); }
   document.body.classList.add('has-timer');
   drawTimer();
 }
@@ -1188,9 +1194,20 @@ function stopTimer() {
   clearInterval(T.iv);
   T.iv = null;
   $('#timer').hidden = true;
+  $('#timer').classList.remove('open');
   document.body.classList.remove('has-timer');
 }
+// (An old cached page may not have the ring yet.)
+const ring = v => { const p = $('#tm-prog'); if (p) p.style.strokeDashoffset = String(v); };
 function drawTimer() {
+  if (T.up) {
+    const gone = Math.floor((Date.now() - T.start) / 1000);
+    if (gone > 300) { stopTimer(); return; }
+    $('#tm-left').textContent = fmtClock(gone);
+    $('#tm-label').textContent = 'Switch';
+    ring(0);
+    return;
+  }
   const left = Math.max(0, Math.ceil((T.end - Date.now()) / 1000));
   if (left === 0 && !T.doneAt) {
     T.doneAt = Date.now();
@@ -1198,8 +1215,8 @@ function drawTimer() {
   }
   if (T.doneAt && Date.now() - T.doneAt > 8000) { stopTimer(); return; }
   $('#tm-left').textContent = T.doneAt ? 'Go!' : fmtClock(left);
-  $('#tm-label').textContent = T.doneAt ? 'Rest done' : 'Rest';
-  $('#tm-fill').style.width = `${T.total ? (left / T.total) * 100 : 0}%`;
+  $('#tm-label').textContent = T.doneAt ? 'Done' : 'Rest';
+  ring(T.total ? 100 - (left / T.total) * 100 : 100);
 }
 function timerDone() {
   $('#timer').classList.add('done');
@@ -3904,8 +3921,15 @@ const ACT = {
     render(); toast('Workout deleted');
   },
 
-  'tm-add': d => { T.end += +d.d * 1000; T.total = Math.max(T.total + +d.d, 1); if (T.doneAt) { T.doneAt = 0; $('#timer').classList.remove('done'); } drawTimer(); },
+  'tm-add': d => {
+    clearTimeout(T.openT); T.openT = setTimeout(() => $('#timer').classList.remove('open'), 5000); T.end += +d.d * 1000; T.total = Math.max(T.total + +d.d, 1); if (T.doneAt) { T.doneAt = 0; $('#timer').classList.remove('done'); } drawTimer(); },
   'tm-stop': () => stopTimer(),
+  // Tap the timer for −15, +15, and Skip; they tuck away again after a few seconds.
+  'tm-toggle': () => {
+    const el = $('#timer'), open = el.classList.toggle('open');
+    clearTimeout(T.openT);
+    if (open) T.openT = setTimeout(() => el.classList.remove('open'), 5000);
+  },
   'test-timer': () => startTimer(5),
 
   'sheet-close': () => closeSheet(),
