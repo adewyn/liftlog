@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.7.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -13,7 +13,7 @@ const DEFAULT_SETTINGS = {
   goal: 'maintain', creatine: true, deloadUntil: null, deloadLast: null, deloadSnooze: null,
   proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
   reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', measureOn: false, measureTime: '10:00', id: null },
-  trainer: { on: false, k: null, lastSync: 0, lastId: null },
+  trainer: { on: false, k: null, lastSync: 0, lastId: null, photos: [] },
 };
 // The weigh-in reminder server (server/push in this folder) and its public key.
 const PUSH_URL = 'https://liftlog-push.sporebound.workers.dev';
@@ -3779,6 +3779,8 @@ function trainerSnapshot() {
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     program: S.program, settings, workouts: S.workouts,
     body: Object.values(S.body).map(({ items, ...b }) => b),
+    proteinToday: liveTarget(todayStr()),
+    photos: S.photos.map(p => ({ id: p.id, date: p.date })),
     coachLog: S.coachLog.slice(0, 10).map(c => ({ id: c.id, date: c.date, undone: !!c.undone })),
   };
 }
@@ -3788,14 +3790,30 @@ async function trainerSync(force) {
   if (!t.on || !t.k || trainerBusy || !navigator.onLine) return;
   const data = trainerSnapshot();
   const sig = JSON.stringify({ ...data, exportedAt: 0 });
-  if (!force && sig === S.trainerSig) return;
+  const sentP = new Set(t.photos || []);
+  const photosLeft = S.photos.some(p => !sentP.has(p.id)) || sentP.size > S.photos.length;
+  if (!force && sig === S.trainerSig && !photosLeft) return;
   trainerBusy = true;
   try {
-    await pushApi('sync', { k: t.k, data });
+    if (force || sig !== S.trainerSig) await pushApi('sync', { k: t.k, data });
     S.trainerSig = sig;
     t.lastSync = Date.now();
     saveSettings();
+    await trainerPhotos();
   } catch (err) { /* try again next time */ } finally { trainerBusy = false; }
+}
+// Progress photos go up one at a time, once each; deleted ones come down from the server too.
+const blobUrl = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(b); });
+async function trainerPhotos() {
+  const t = S.settings.trainer, sent = new Set(t.photos || []), have = new Set(S.photos.map(p => p.id));
+  for (const id of [...sent].filter(id => !have.has(id))) {
+    await pushApi('photo', { k: t.k, id, del: true });
+    sent.delete(id); t.photos = [...sent]; saveSettings();
+  }
+  for (const p of S.photos.filter(p => !sent.has(p.id) && p.blob)) {
+    await pushApi('photo', { k: t.k, id: p.id, date: p.date, data: await blobUrl(p.blob) });
+    sent.add(p.id); t.photos = [...sent]; saveSettings();
+  }
 }
 async function trainerPull() {
   const t = S.settings.trainer;
@@ -3920,10 +3938,10 @@ function trainerSettingsCard() {
   return `<h2>Nightly trainer</h2>
     <div class="card">
       <div class="rem-row">
-        <div><b>Midnight check-in</b><small>Each night a trainer looks at your lifts, weigh-ins, measurements, check-ins, and notes, then adjusts your upcoming workouts for a strong, balanced, athletic build. Notes show up on Today.</small></div>
+        <div><b>Midnight check-in</b><small>Each night a trainer looks at your lifts, weigh-ins, measurements, progress photos, protein, check-ins, and notes, then adjusts your upcoming workouts for a strong, balanced, athletic build. Notes show up on Today.</small></div>
         <button class="toggle ${t.on ? 'on' : ''}" data-a="trainer-toggle" aria-pressed="${!!t.on}">${t.on ? 'On' : 'Off'}</button>
       </div>
-      ${t.on ? `<div class="sh-hint">Last sent: ${esc(ago)}. Sends on its own while you use the app (not photos or food). Turning it off deletes the copy.</div>
+      ${t.on ? `<div class="sh-hint">Last sent: ${esc(ago)}. Sends on its own while you use the app, progress photos and protein included (not the foods you ate). Turning it off deletes the copy.</div>
         <button class="btn block" style="margin-top:10px" data-a="trainer-now">Send now</button>` : ''}
       ${past.length ? `<button class="linkbtn" style="margin-top:12px" data-a="coach-notes">${S.coachNotesOpen ? 'Hide past notes' : `Past notes (${past.length})`}</button>
         ${S.coachNotesOpen ? past.map(c => `<div class="tr-past"><div class="lbl">${esc(fmtDate(c.date, { weekday: 'short', month: 'short', day: 'numeric' }))}${c.undone ? ' · undone' : ''}</div>${c.note ? `<div class="tr-note">${esc(c.note).replace(/\n+/g, '<br>')}</div>` : ''}${coachLines(c)}</div>`).join('') : ''}` : ''}
@@ -3932,7 +3950,7 @@ function trainerSettingsCard() {
 async function trainerToggle() {
   const t = S.settings.trainer;
   if (!t.on) {
-    if (!confirm('Turn on the nightly trainer?\n\nA copy of your log (workouts, weigh-ins, measurements, check-ins, and notes; not photos or food) goes to your private Lift Log server while you use the app. At midnight your trainer reads it and may change your upcoming workouts. Turn it off anytime to delete the copy.')) return;
+    if (!confirm('Turn on the nightly trainer?\n\nA copy of your log (workouts, weigh-ins, measurements, check-ins, notes, protein, and progress photos) goes to your private Lift Log server while you use the app. At midnight your trainer reads it and may change your upcoming workouts. Turn it off anytime to delete the copy.')) return;
     t.k = t.k || `t_${Array.from(crypto.getRandomValues(new Uint8Array(28)), b => (b % 36).toString(36)).join('')}`;
     t.on = true; t.lastSync = 0;
     saveSettings(); render();
@@ -3940,7 +3958,7 @@ async function trainerToggle() {
     toast(t.lastSync ? 'Nightly trainer on. First check-in tonight at midnight.' : "Nightly trainer on, but couldn't send yet. It'll try again.", 5000);
     return;
   }
-  t.on = false;
+  t.on = false; t.photos = [];
   saveSettings(); render();
   try { await pushApi('sync', { k: t.k, off: true }); toast('Nightly trainer off. Your copy on the server is deleted.'); } catch (err) { toast("Trainer off. Couldn't reach the server to delete the copy; turn it on and off again later."); }
 }

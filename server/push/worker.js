@@ -31,13 +31,31 @@ export default {
 
     // Nightly trainer (opt-in in the app). The phone sends a copy of its log under a long secret key;
     // the trainer reads it at midnight and leaves program changes under the same key for the app to pick up.
-    if (path === 'sync' || path === 'coach') {
+    if (path === 'sync' || path === 'coach' || path === 'photo') {
       const k = String(body.k || '');
       if (!/^t_[a-z0-9]{24,40}$/.test(k)) return reply({ error: 'bad key' }, 400);
       if (path === 'coach') return reply((await env.SUBS.get(`coach:${k}`, 'json')) || {});
+      if (path === 'photo') {
+        // Progress photos, one per key, only for a phone that's already sending its log.
+        const id = String(body.id || '');
+        if (!/^[\w-]{3,40}$/.test(id)) return reply({ error: 'bad photo id' }, 400);
+        if (body.del) { await env.SUBS.delete(`photo:${k}:${id}`); return reply({ ok: true }); }
+        if (!(await env.SUBS.get(`sync:${k}`))) return reply({ error: 'turn the trainer on first' }, 403);
+        const data = String(body.data || '');
+        if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(data) || data.length > 6_000_000) return reply({ error: 'bad photo' }, 400);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(body.date || '')) return reply({ error: 'bad date' }, 400);
+        await env.SUBS.put(`photo:${k}:${id}`, data, { metadata: { date: body.date } });
+        return reply({ ok: true });
+      }
       if (body.off) {
         await env.SUBS.delete(`sync:${k}`);
         await env.SUBS.delete(`coach:${k}`);
+        let cursor;
+        do {
+          const page = await env.SUBS.list({ prefix: `photo:${k}:`, cursor });
+          await Promise.all(page.keys.map(x => env.SUBS.delete(x.name)));
+          cursor = page.list_complete ? null : page.cursor;
+        } while (cursor);
         return reply({ ok: true });
       }
       if (!body.data || typeof body.data !== 'object' || body.data.app !== 'liftlog') return reply({ error: 'bad data' }, 400);
