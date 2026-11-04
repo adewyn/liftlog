@@ -729,3 +729,12 @@ h2::before { content: ""; width: 6px; height: 6px; border-radius: 2px; backgroun
 .fold-say.say-down { color: #9fd3ff; background: none; }
 @media (prefers-reduced-motion: reduce) { .say.fresh { animation: none; } }
 .pcoach .pc-add { max-width: 100%; }
+
+/* sheet close: a button that stays in reach while scrolling */
+.sh-top { position: sticky; top: 0; z-index: 3; height: 0; display: flex; justify-content: flex-end; }
+.sh-x { display: grid; place-items: center; width: 44px; height: 44px; margin: -4px -6px 0 0; border-radius: 50%; background: var(--s2); box-shadow: 0 0 0 1px var(--line) inset, 0 6px 16px rgba(0, 0, 0, .35); color: var(--mut); }
+.sh-x .ic { width: 20px; height: 20px; }
+.sh-x:active { transform: scale(.94); }
+.sh-grip { width: 48px; height: 5px; margin-top: 4px; }
+.sh-title { padding-right: 48px; }
+.sheet-panel { overscroll-behavior: contain; will-change: transform; }

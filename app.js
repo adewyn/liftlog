@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.4.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -3172,8 +3172,46 @@ function renderSheet() {
   if (!S.sheet) { el.hidden = true; document.body.classList.remove('sheet-open'); return; }
   el.hidden = false;
   document.body.classList.add('sheet-open');
-  $('#sheet-panel').innerHTML = ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
+  // A close button that stays in reach while the sheet scrolls.
+  $('#sheet-panel').innerHTML = `<div class="sh-top"><button class="sh-x" data-a="sheet-close" aria-label="Close">${ic('x')}</button></div>`
+    + ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
 }
+// Swipe a sheet down to close it: from the top edge, or anywhere once it's scrolled to the top.
+(function sheetSwipe() {
+  const panel = document.getElementById('sheet-panel');
+  if (!panel) return;
+  let y0 = 0, t0 = 0, dy = 0, drag = false, armed = false;
+  panel.addEventListener('touchstart', ev => {
+    if (ev.touches.length !== 1) return;
+    const t = ev.target, nearTop = ev.touches[0].clientY - panel.getBoundingClientRect().top < 56;
+    armed = (panel.scrollTop <= 0 || nearTop) && !t.closest('input, textarea, select');
+    y0 = ev.touches[0].clientY; t0 = Date.now(); dy = 0; drag = false;
+  }, { passive: true });
+  panel.addEventListener('touchmove', ev => {
+    if (!armed) return;
+    dy = ev.touches[0].clientY - y0;
+    if (!drag && dy > 8 && (panel.scrollTop <= 0 || y0 - panel.getBoundingClientRect().top < 56)) { drag = true; panel.style.transition = 'none'; }
+    if (!drag) { if (dy < -4) armed = false; return; }
+    ev.preventDefault();
+    panel.style.transform = `translateY(${Math.max(0, dy)}px)`;
+  }, { passive: false });
+  const end = () => {
+    if (!drag) { armed = false; return; }
+    const fast = dy > 40 && dy / Math.max(1, Date.now() - t0) > 0.5;
+    panel.style.transition = 'transform .2s ease-out';
+    if (dy > Math.min(140, panel.offsetHeight * 0.25) || fast) {
+      panel.style.transform = 'translateY(100%)';
+      setTimeout(() => { panel.style.transition = ''; panel.style.transform = ''; closeSheet(); }, 190);
+    } else {
+      panel.style.transform = '';
+      setTimeout(() => { panel.style.transition = ''; }, 210);
+    }
+    drag = false; armed = false;
+  };
+  panel.addEventListener('touchend', end);
+  panel.addEventListener('touchcancel', end);
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && S.sheet) closeSheet(); });
+})();
 
 function infoSheetHTML() {
   const sh = S.sheet;
