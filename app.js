@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -134,12 +134,20 @@ function jumpFor(t, w) {
   const pct = t.kind !== 'iso' && t.body === 'upper' ? 0.04 : 0.05;
   return Math.max(step, roundTo((+w || 0) * pct, step));
 }
-const PROGRAM_V = 2;
+const PROGRAM_V = 3;
 // Brings an older saved program up to date with the trainer review (Nov 2026): wider ranges for
 // small lifts, a quad lift and an overhead press on Wednesday, and a real abs exercise. Only touches
 // exercises that still match the original program, so your own edits stay.
 function migrateProgram(p) {
-  if ((p.v || 1) >= 2) return false;
+  if ((p.v || 1) >= PROGRAM_V) return false;
+  // v3: no hack squat machine at your gym, so it's the leg press you already use.
+  if ((p.v || 1) >= 2) {
+    [...DAYS.map(d => p.days[d]), ...(p.custom || [])].forEach(day => (day.groups || []).forEach(g => g.forEach(x => {
+      if (/^hack squat$/i.test(x.name)) x.name = 'Leg press';
+    })));
+    p.v = PROGRAM_V;
+    return true;
+  }
   const each = fn => DAYS.forEach(d => (p.days[d].groups || []).forEach(g => g.forEach(fn)));
   each(x => {
     if (/^lateral raise$/i.test(x.name) && x.min === 12 && x.max === 15) x.max = 20;
@@ -151,7 +159,7 @@ function migrateProgram(p) {
     const gs = wed.groups = wed.groups || [];
     const has = re => gs.some(g => g.some(x => re.test(x.name)));
     const at = re => gs.findIndex(g => g.some(x => re.test(x.name)));
-    if (!has(/squat|leg press|lunge/i)) gs.splice(Math.max(0, at(/romanian|rdl/i)), 0, [ex('Hack squat', 3, 8, 12, LO)]);
+    if (!has(/squat|leg press|lunge/i)) gs.splice(Math.max(0, at(/romanian|rdl/i)), 0, [ex('Leg press', 3, 8, 12, LO)]);
     if (!has(/overhead press|shoulder press|military|arnold/i)) {
       const r = at(/^row$/i);
       gs.splice(r >= 0 ? r + 1 : gs.length, 0, [ex('Seated DB shoulder press', 3, 8, 10, UP)]);
@@ -178,7 +186,7 @@ function defaultProgram() {
       tue: { label: 'Yoga + walk/run', type: 'cardio' },
       wed: { label: 'Full body B', type: 'strength', groups: [
         [ex('Incline DB press', 3, 8, 10, UP)],
-        [ex('Hack squat', 3, 8, 12, LO)],
+        [ex('Leg press', 3, 8, 12, LO)],
         [ex('Romanian deadlift', 3, 8, 8, LO)],
         [ex('Row', 3, 8, 10, UP)],
         [ex('Seated DB shoulder press', 3, 8, 10, UP)],
@@ -227,7 +235,7 @@ async function loadState() {
   const kv = Object.fromEntries((await DB.all('kv')).map(r => [r.k, r.v]));
   S.program = kv.program || defaultProgram();
   S.program.custom = S.program.custom || [];
-  const migrated = migrateProgram(S.program);
+  const oldV = S.program.v || 1, migrated = migrateProgram(S.program);
   allPlans().forEach(p => (p.groups || []).forEach(g => g.forEach(classify)));
   S.settings = { ...DEFAULT_SETTINGS, ...(kv.settings || {}) };
   S.settings.reminder = { ...DEFAULT_SETTINGS.reminder, ...((kv.settings || {}).reminder || {}) };
@@ -235,7 +243,7 @@ async function loadState() {
   if (!S.settings.streakRuleFrom) { S.settings.streakRuleFrom = todayStr(); await saveSettings(); }
   S.foods = kv.foods || [];
   if (!kv.program || migrated) await saveProgram();
-  if (migrated && kv.program) S.notice = 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
+  if (migrated && kv.program) S.notice = oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
   S.workouts = await DB.all('workouts');
   // 1.9 saved imported activity-only days under Sunday.
   const moved = S.workouts.filter(w => w.imported && w.dayKey === 'sun' && w.type === 'rest');
@@ -245,6 +253,10 @@ async function loadState() {
   (await DB.all('body')).forEach(b => { S.body[b.date] = b; });
   S.photos = await DB.all('photos').catch(() => []);
   S.draft = null;
+  // Today's workout may already be saved with the hack squat in it: swap any not started yet.
+  S.workouts.filter(w => w.date === todayStr()).forEach(w => (w.exercises || []).forEach(e => {
+    if (/^hack squat$/i.test(e.name) && !e.sets.some(x => x.done)) { e.name = 'Leg press'; e.key = keyOf(e.name); fillSets(e, w); persist(w); }
+  }));
 }
 
 const saveFailed = err => toast(`Couldn't save: ${err.message}`, 6000);
@@ -313,7 +325,7 @@ function recentPerf(key, w, n) {
     if (o.id === w.id) continue;
     if (o.date > w.date || (o.date === w.date && o.createdAt > w.createdAt)) continue;
     const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length);
-    if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) });
+    if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) || offDay(o), note: liftNote(o, e.name) });
   }
   return out;
 }
@@ -347,7 +359,7 @@ function coachPlan(t, recent, opts = {}) {
     return plan('beat', prev, reps, `Beat last time: ${total} ${unit} in total. Go for one more.${tip}`);
   }
   const lo = t.min ?? t.max, hi = t.max ?? t.min;
-  const holdWhy = opts.energy === 'low' ? "energy's low" : opts.tired || '';
+  const holdWhy = opts.energy === 'low' ? (opts.sick ? 'you noted being sick' : "energy's low") : opts.tired || (opts.noted === 'lift-pain' ? 'you noted pain last time' : opts.noted === 'lift-hard' ? 'you wrote it felt hard last time' : '');
   // Sessions logged on a low-energy day don't count as misses.
   const short = p => !p.easy && (p.sets.length < t.sets || p.sets.some(x => +x.r < lo));
 
@@ -375,9 +387,9 @@ function coachPlan(t, recent, opts = {}) {
       return plan('reps', prev, fill(hi + 2), `${round2(top + jumpFor(t, top))} lb is a big step from ${top}, so earn it first: get ${hi + 2} on every set.`);
     }
     const lastRir = last.sets[last.sets.length - 1].rir;
-    const easy = lastRir != null && lastRir >= 3;
+    const easy = (lastRir != null && lastRir >= 3) || opts.noted === 'lift-easy';
     const w = round2(top + jumpFor(t, top) * (easy ? 2 : 1));
-    return plan('up', fill(w), fill(lo), easy ? `You hit ${hi} on every set with reps to spare, so it's a bigger jump to ${w} lb. Aim for ${lo} or more.` : `You hit ${hi} on every set last time, so it's up to ${w} lb. Aim for ${lo} or more.`);
+    return plan('up', fill(w), fill(lo), easy ? `You hit ${hi} on every set ${opts.noted === 'lift-easy' ? 'and wrote it felt easy' : 'with reps to spare'}, so it's a bigger jump to ${w} lb. Aim for ${lo} or more.` : `You hit ${hi} on every set last time, so it's up to ${w} lb. Aim for ${lo} or more.`);
   }
   if (short(last)) {
     const p2 = recent[1];
@@ -389,10 +401,14 @@ function coachPlan(t, recent, opts = {}) {
     }
     return plan('hold', prev, reps.map(r => Math.max(r, lo)), `Stay at ${wTxt(top)} and get ${lo} on every set.`);
   }
-  if (opts.energy === 'low') return plan('hold', prev, reps, `Low energy today, so just match last time at ${wTxt(top)}.`);
+  if (opts.energy === 'low') return plan('hold', prev, reps, `${opts.sick ? 'You noted being sick' : 'Low energy today'}, so just match last time at ${wTxt(top)}.`);
+  if (opts.noted === 'lift-pain' || opts.noted === 'lift-hard') return plan('hold', prev, reps, `Match last time at ${wTxt(top)}, since ${opts.noted === 'lift-pain' ? 'you noted pain here' : 'you wrote it felt hard'}.`);
+  if (opts.noted === 'lift-easy') {
+    return plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 2))), `You wrote it felt easy, so same weight and go for two more reps per set (top of the range is ${hi}).`);
+  }
   if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi)) return plan('hold', prev, reps, `Your last set was all-out, so match last time at ${wTxt(top)} before adding reps.`);
   return plan('reps', prev,
-    Array.from({ length: t.sets }, (_, k) => Math.min(hi, at(reps, k) + 1)),
+    Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 1))),
     `Same weight. Go for one more rep per set (top of the range is ${hi}).`);
 }
 
@@ -438,11 +454,19 @@ function fillSets(e, w) {
   // Shoulder care stays at 10 to 15 reps; lifts that cause pressure move to lighter sets of 10 to 15.
   const t = rehab || care === 'pressure' ? { ...base, min: Math.max(base.min ?? 10, 10), max: Math.max(base.max ?? 15, 15) } : base;
   const low = !rehab && lowDay(w.date), deload = !rehab && !!w.deload;
-  const recent = recentPerf(e.key, w, 6), real = recent.filter(p => !p.easy);
+  // Easy-day sessions (low energy, deload, tired or sick in your notes) only count if you still hit every set.
+  const full = p => p.sets.length >= t.sets && p.sets.every(x => +x.r >= (t.min ?? t.max ?? 0));
+  const recent = recentPerf(e.key, w, 6), real = recent.filter(p => !p.easy || full(p));
   const tired = sleepShort(w.date) ? 'you slept under 6 hours' : t.body === 'lower' ? legsTired(w.date) : '';
   const short2 = !rehab && energyFor(w.date) !== 'low' && twoShortNights(w.date) ? "you've had two short nights" : '';
-  let plan = coachPlan(t, real.length ? real.slice(0, 2) : recent.slice(0, 2), { energy: rehab ? null : energyFor(w.date), tired: rehab ? '' : tired || short2 || (deload ? "it's a deload week" : '') });
-  const cb = rehab ? null : comeback(t, recent, w.date);
+  // Never reach back past a break for the last normal session: build on the easy one instead (it isn't a miss).
+  const stale = real.length && recent.length && daysBetween(real[0].date, recent[0].date) >= 21;
+  const basis = real.length && !stale ? real.slice(0, 2) : recent.slice(0, 2), noted = basis[0] && basis[0].note;
+  let plan = coachPlan(t, basis, { energy: rehab ? null : energyFor(w.date) || (sickNoted(w.date) ? 'low' : null), sick: !rehab && !energyFor(w.date) && !!sickNoted(w.date), tired: rehab ? '' : tired || short2 || (deload ? "it's a deload week" : ''), noted: noted && noted.k });
+  let cb = rehab ? null : comeback(t, recent, w.date);
+  // Building back after a break waits a session when today's an easy day or your note said hard or pain.
+  const pause = cb && cb.kind === 'up' && (low ? 'today is an easy day' : [noted, recent[0] && recent[0].note].some(x => x && (x.k === 'lift-hard' || x.k === 'lift-pain')) ? 'your note said it was rough' : '');
+  if (pause) cb = { ...cb, kind: 'hold', ws: cb.ws.map(() => cb.from), note: `Same ${cb.from} lb as last time, since ${pause}. Building back resumes next session.` };
   if (cb) plan = { ...(plan || { prev: null }), kind: cb.kind, ws: cb.ws, w: Math.max(...cb.ws), from: cb.from, reps: cb.reps, note: cb.note };
   else if (plan && deload) plan = { ...plan, kind: 'hold', ws: plan.prev, w: plan.from, reps: plan.prev.map(() => t.min ?? t.max ?? 8), note: '' };
   if (plan && (care || rehab) && !cb) {
@@ -462,7 +486,9 @@ function fillSets(e, w) {
     : low ? '2 sets today. Stop each one with 2 or 3 reps left in the tank.' : '';
   if (extra && (!plan || (deload && !cb))) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
   const helps = soreHelpers(e.name, w.date);
-  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', helps ? `Your sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here, so go lighter and stop if it pulls.` : ''].filter(Boolean).join(' ');
+  const noteCue = !noted ? '' : noted.k === 'lift-pain' ? 'Keep it light, and stop if it hurts.'
+    : noted.k === 'lift-cramp' && care !== 'cramp' ? CARE_CUES.cramp : '';
+  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', noteCue, helps ? `Your sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here, so go lighter and stop if it pulls.` : ''].filter(Boolean).join(' ');
   if (cue) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${cue}`.trim() } : { kind: 'hold', note: cue, from: 0, w: 0, prev: null };
   const n = deload && !cb ? Math.ceil(sets / 2) : low ? Math.min(2, sets) : sets;
   const done = e.sets.filter(s => s.done);
@@ -489,7 +515,7 @@ function comeback(t, recent, date) {
     if (gap <= 42) return { kind: 'hold', ws: fill(top), reps: fill(lo), n: t.sets, from: top, note: `First time in ${away}, so the same ${top} lb as last time and ${lo} reps. Strength holds well this long.` };
     const pct = gap > 90 ? 0.7 : 0.85, n = gap > 90 ? 2 : Math.max(2, t.sets - 1);
     const w = Math.max(step, roundTo(top * pct, step));
-    return { kind: 'down', ws: fill(w, n), reps: fill(lo, n), n, from: top, note: `First time in ${away}, so ${w} lb today (about ${Math.round(pct * 100)}%). It goes up each session until you're back at ${top} lb.` };
+    return { kind: 'down', ws: fill(w, n), reps: fill(lo, n), n, from: top, note: `First time in ${away}, so ${n} sets at ${w} lb today (about ${Math.round(pct * 100)}%) to ease back in. It builds each session until you're back to ${t.sets} sets at ${top} lb.` };
   }
   // Already back for a session or few: find where the break was and the weight from before it.
   const k = recent.findIndex((p, i) => i < 4 && recent[i + 1] && daysBetween(recent[i + 1].date, p.date) >= 21);
@@ -546,8 +572,8 @@ const sleepFor = date => (S.body[date] || {}).sleep ?? null;
 const sleepShort = date => sleepFor(date) != null && sleepFor(date) < 6;
 // Two nights of 6 hours or less in a row count like a low-energy day.
 const twoShortNights = date => [date, addDays(date, -1)].every(d => sleepFor(d) != null && sleepFor(d) <= 6);
-const lowDay = date => energyFor(date) === 'low' || twoShortNights(date);
-const planKeyFor = date => `${energyFor(date) || ''}|${sleepShort(date) ? 's' : ''}|${twoShortNights(date) ? 't' : ''}|${deloadState(date).active ? 'd' : ''}|${JSON.stringify(S.settings.care || {})}|${soreFor(date).join(',')}`;
+const lowDay = date => energyFor(date) === 'low' || twoShortNights(date) || (!energyFor(date) && !!sickNoted(date));
+const planKeyFor = date => `${energyFor(date) || ''}|${sleepShort(date) ? 's' : ''}|${twoShortNights(date) ? 't' : ''}|${deloadState(date).active ? 'd' : ''}|${JSON.stringify(S.settings.care || {})}|${soreFor(date).join(',')}|${!energyFor(date) && sickNoted(date) ? 'sick' : ''}`;
 
 // ----- weekly sets per muscle -----
 // Direct work counts as a full set, big helpers as half (a bench set is 1 chest, ½ triceps).
@@ -634,13 +660,25 @@ function applySore(w) {
   let gid = Math.max(0, ...w.exercises.map(e => +e.group || 0)) + 1;
   picks.forEach(x => { const e = sessionExercise(x, gid++, w); e.soreAdd = true; w.exercises.push(e); });
 }
+// Things from recent notes that change today, said up front.
+function noteBanner(date) {
+  const sick = !energyFor(date) && sickNoted(date), cramp = notedSince(addDays(date, -1), 1, ['cramp'])[0];
+  const day = d => (d === addDays(date, -1) ? 'yesterday' : esc(fmtDate(d, { weekday: 'long' })));
+  const lines = [];
+  if (sick) lines.push(`<b>You noted being sick ${day(sick.date)}.</b> Today's plan goes easy: 2 sets a lift, no weight jumps, and a walk instead of a run. Feel fine? Check in as OK or Great above.`);
+  if (cramp) lines.push(`<b>You noted cramps ${day(cramp.date)}.</b> Drink water and have something salty an hour or so before you train.`);
+  return lines.length ? `<div class="card note-banner">${lines.map(l => `<div>${l}</div>`).join('')}</div>` : '';
+}
 function soreCard(w) {
   const allDone = w.exercises.length && w.exercises.every(e => e.sets.every(x => x.done));
   if (w.type !== 'strength' || w.date !== todayStr() || allDone) return '';
   const on = soreFor(w.date), out = w.soreOut || [], add = w.exercises.filter(e => e.soreAdd);
+  const sug = Object.values(soreFromNotes(w.date)).filter(x => !on.includes(x.about));
+  const day = d => (d === w.date ? 'today' : d === addDays(w.date, -1) ? 'yesterday' : esc(fmtDate(d, { weekday: 'long' })));
   return `<div class="card sore-card">
     <div class="lbl" style="margin-top:0">Too sore for something today?</div>
-    <div class="chips">${Object.entries(SORE_GROUPS).map(([k, [n]]) => `<button class="chip ${on.includes(k) ? 'on' : ''}" data-a="sore-tog" data-g="${k}">${n}</button>`).join('')}</div>
+    <div class="chips">${Object.entries(SORE_GROUPS).map(([k, [n]]) => `<button class="chip ${on.includes(k) ? 'on' : sug.some(x => x.about === k) ? 'sug' : ''}" data-a="sore-tog" data-g="${k}">${n}</button>`).join('')}</div>
+    ${sug.map(x => `<div class="note-sug"><span>Your notes ${day(x.date)}: <b>${esc(x.k === 'pain-part' ? `${x.word} pain` : `sore ${x.word}`)}</b></span><button class="linkbtn" data-a="sore-tog" data-g="${x.about}">Work around ${MUSCLE_GROUP_NAME[x.about]}</button></div>`).join('')}
     ${on.length ? `<div class="sh-hint">${out.length ? `Sitting out: <b>${out.map(e => esc(e.name)).join(', ')}</b>.` : 'Nothing today works that hard.'}${add.length ? ` Added: <b>${add.map(e => esc(e.name)).join(', ')}</b>, for muscles that are behind this week.` : ''} Tap again to undo.</div>`
       : '<div class="sh-hint">Pick it, and today\'s lifts for it sit out while other muscles fill in.</div>'}
   </div>`;
@@ -1066,7 +1104,178 @@ const ENERGY_HINT = {
   ok: 'Normal plan today.',
   great: 'Feeling good: yoga and cardio picks lean a little harder today.',
 };
-const SORE_WORDS = /\b(sore|tight|stiff|pain|painful|ache|aching|achy|hurt|hurts|tweak|tweaked|strain|cramp|cramps|cramping|pinch|discomfort)/i;
+// ----- notes the coach reads -----
+// Notes are split into clauses (sentences, lines, and "but"), and each clause is checked for what it's
+// about (a lift from that workout, a body part) and how it went (sore, pain, easy, hard, and so on).
+// "No pain", "not sore", and "knee felt fine" don't count. Everything it acts on shows as a tag under
+// the note, and tapping one says exactly what it changes.
+const NOTE_SIG = {
+  sore: /\b(sore|soreness|tight|tightness|stiff|stiffness|achy|aching|aches?|doms)\b/,
+  pain: /\b(pain|painful|hurts?|hurting|sharp|tweak(?:ed|y)?|strain(?:ed)?|pulled|pinch(?:ed|ing|y)?|injur(?:y|ed)|twinge|tender|swollen|throbbing|clicking|popping)\b/,
+  easy: /\b(easy|too light|felt light|was light|breeze|more in the tank|could(?:'ve| have)? done more|could do more)\b/,
+  hard: /\b(hard|heavy|tough|grind(?:y|ed|ing)?|struggl(?:e|ed|ing)|fail(?:ed|ure)?|barely|brutal|killer|form broke)\b/,
+  cramp: /\b(cramp(?:s|ed|ing|y)?|charley horse|spasms?)\b/,
+  sick: /\b(sick|ill|flu|fever|covid|nause(?:a|ous)|stomach bug|food poisoning|migraine|under the weather|(?:a|head|chest) cold)\b/,
+  tired: /\b(tired|exhausted|drained|wiped|fatigued|no energy|low energy|sluggish|sleepy|groggy)\b/,
+  heat: /\b(hot|heat|humid|humidity|hills?|hilly|trail|windy|wind|uphill|snow|rain(?:y|ing)?|altitude|stroller|incline)\b/,
+};
+const NOTE_PARTS = [
+  [/\b(lower back|upper back|mid back|lats?|traps?)\b/, 'back'],
+  [/\b(chest|pecs?)\b/, 'chest'],
+  [/\b(shoulders?|delts?|rotator cuff)\b/, 'shoulders'],
+  [/\b(biceps?|triceps?|bis|tris|forearms?|elbows?|wrists?|arms?)\b/, 'arms'],
+  [/\b(quads?|hamstrings?|hams|glutes?|butt|calf|calves|knees?|hips?|groin|adductors?|ankles?|shins?|feet|foot|achilles|heels?|it band|legs?)\b/, 'legs'],
+  [/\b(abs|core|obliques?|stomach)\b/, 'core'],
+];
+// "Back" alone is too common ("back to normal"), so it only counts next to a soreness or pain word.
+const BACK_RE = /\b(my back|back (?:is|was|feels?|felt|pain|hurts?|hurting|sore|tight|stiff|achy)|(?:sore|tight|stiff|achy|hurt|tweaked|strained|painful) back)\b/;
+const RUN_PARTS = /\b(ankles?|knees?|shins?|feet|foot|calf|calves|hips?|achilles|heels?|it band|hamstrings?)\b/;
+const NEG_BEFORE = /\b(no|not|never|without|zero|nothing|isn'?t|wasn'?t|didn'?t|don'?t|doesn'?t|aren'?t|weren'?t|hasn'?t|haven'?t|less|hardly)(?: \S+){0,2} ?$/;
+const NEG_AFTER = /^ ?(free|is gone|gone|went away)\b/;
+const RECOVERED = /\b(better|fine|healed|recovered|gone|went away|no longer|all good|feels? good|felt good|feels? great|felt great)\b/;
+const LIFT_GENERIC = new Set(['db', 'dumbbell', 'dumbbells', 'bb', 'barbell', 'machine', 'cable', 'cables', 'seated', 'standing', 'smith', 'the', 'of', 'with', 'single', 'one', 'arm', 'press', 'row', 'curl', 'fly', 'flye', 'raise', 'extension', 'lying', 'stack', 'and', 'or', 'up']);
+const MOVE_WORDS = new Set(['press', 'row', 'curl', 'fly', 'flye', 'raise', 'extension']);
+const isPartWord = t => t === 'back' || RUN_PARTS.test(t) || NOTE_PARTS.some(([re]) => re.test(t));
+const noteText = s => ` ${String(s || '').toLowerCase().replace(/[‘’]/g, "'").replace(/\b(pull|push|chin)[ -]?ups?\b/g, '$1 up').replace(/[^a-z0-9' ]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// What each lift in the workout can be called: its full name, word pairs from it, and words only it
+// has ("pulldown", "thrust"). Body-part words ("shoulder", "calf") only count inside a pair.
+function liftAliases(names) {
+  const toks = names.map(n => noteText(normName(n).replace(/\(.*?\)/g, '')).trim().split(' ').filter(Boolean));
+  const cands = toks.map(ws => {
+    const al = new Set([ws.join(' ')]);
+    for (let k = 0; k + 1 < ws.length; k++) if (!(LIFT_GENERIC.has(ws[k]) && LIFT_GENERIC.has(ws[k + 1]))) al.add(`${ws[k]} ${ws[k + 1]}`);
+    // Movement words ("curls", "fly") count when only one lift in the workout has them.
+    ws.forEach(t => { if (t.length > 2 && (!LIFT_GENERIC.has(t) || MOVE_WORDS.has(t)) && !isPartWord(t)) al.add(t); });
+    const j = ws.join(' ');
+    if (/romanian|\brdl\b/.test(j)) al.add('rdl');
+    if (/bench/.test(j)) al.add('bench');
+    if (/overhead press/.test(j)) al.add('ohp');
+    return al;
+  });
+  const count = {};
+  cands.forEach(al => al.forEach(a => { count[a] = (count[a] || 0) + 1; }));
+  return names.map((name, i) => ({ name, res: [...cands[i]].filter(a => a.length > 2 && (count[a] === 1 || a === toks[i].join(' '))).sort((a, b) => b.length - a.length).map(a => new RegExp(`\\b${reEsc(a)}(?:s|es|ing)?\\b`)) }));
+}
+const noteMemo = new Map();
+function parseNotes(text, ctx = {}) {
+  const t = String(text || '').trim();
+  if (!t) return [];
+  const mk = `${t}\u0001${(ctx.lifts || []).join('|')}\u0001${ctx.run ? 1 : 0}${ctx.pace ? 1 : 0}`;
+  if (noteMemo.has(mk)) return noteMemo.get(mk);
+  const lifts = liftAliases(ctx.lifts || []), out = [], seen = new Set();
+  const add = x => { const k = `${x.k}|${x.about || ''}`; if (!seen.has(k)) { seen.add(k); out.push(x); } };
+  // Two lifts in one sentence ("bench was easy, incline was heavy"): each comma part stands alone.
+  const clauses = t.split(/[.!?;\n]+|\bbut\b|\bthough\b|\bhowever\b|\bwhile\b/i).flatMap(c => {
+    const n = lifts.filter(L => L.res.some(r => r.test(noteText(c)))).length;
+    return n > 1 && /,/.test(c) ? c.split(',') : [c];
+  });
+  clauses.forEach(raw => {
+    const quote = raw.trim().replace(/^(and|so|then)\s+/i, '');
+    let rest = noteText(raw);
+    if (!rest.trim()) return;
+    // Lifts named here, blanked out so "calf raise" isn't read as your calf.
+    const named = [];
+    lifts.forEach(L => { const re = L.res.find(r => r.test(rest)); if (re) { named.push(L.name); rest = rest.replace(re, ' '); } });
+    const recovered = RECOVERED.test(rest);
+    const hit = (k, noNeg) => {
+      const m = rest.match(NOTE_SIG[k]);
+      if (!m) return null;
+      const neg = !noNeg && (NEG_BEFORE.test(rest.slice(0, m.index)) || NEG_AFTER.test(rest.slice(m.index + m[0].length)));
+      return { word: m[1], neg };
+    };
+    const ok = x => (x && !x.neg ? x : null);
+    const sore = !recovered && ok(hit('sore')), pain = !recovered && ok(hit('pain'));
+    const easyHit = hit('easy'), easy = ok(easyHit), hard = ok(hit('hard')) || (easyHit && easyHit.neg ? { word: `not ${easyHit.word}` } : null);
+    const cramp = ok(hit('cramp')), sick = ok(hit('sick')), tired = ok(hit('tired')), heat = ctx.pace && ok(hit('heat'));
+    const parts = [];
+    NOTE_PARTS.forEach(([re, g]) => { const m = rest.match(re); if (m && !NEG_BEFORE.test(rest.slice(0, m.index))) parts.push({ g, word: m[1] }); });
+    if (!parts.some(x => x.g === 'back') && BACK_RE.test(rest)) parts.push({ g: 'back', word: 'back' });
+    named.forEach(name => {
+      const how = pain ? ['lift-pain', pain] : cramp ? ['lift-cramp', cramp] : hard ? ['lift-hard', hard] : easy ? ['lift-easy', easy] : ['lift-note', {}];
+      add({ k: how[0], about: name, word: how[1].word || '', quote });
+    });
+    if (sore || pain) parts.forEach(x => add({ k: pain ? 'pain-part' : 'sore-part', about: x.g, word: x.word, sig: (pain || sore).word, quote }));
+    if ((sore || pain) && !parts.length && !named.length) add({ k: 'sore', word: (sore || pain).word, quote });
+    if (ctx.run && !recovered) {
+      const m = rest.match(RUN_PARTS);
+      if (m && !NEG_BEFORE.test(rest.slice(0, m.index))) add({ k: 'run-part', about: m[1], word: m[1], quote });
+    }
+    if (cramp && !named.length) add({ k: 'cramp', word: cramp.word, quote });
+    if (sick) add({ k: 'sick', word: sick.word, quote });
+    if (tired) add({ k: 'tired', word: tired.word, quote });
+    if (heat) add({ k: 'pace', word: heat.word, quote });
+  });
+  if (noteMemo.size > 400) noteMemo.clear();
+  noteMemo.set(mk, out);
+  return out;
+}
+// The notes in a workout, each read with what it can be about.
+const workoutCtx = w => ({ lifts: (w.exercises || []).map(e => e.name), run: (w.activities || []).some(a => a.type === 'run'), pace: (w.activities || []).some(a => a.type === 'run' || a.type === 'walk') });
+const actCtx = a => ({ lifts: [], run: a.type === 'run', pace: a.type === 'run' || a.type === 'walk' });
+const workoutSigs = w => [...parseNotes(w.notes, workoutCtx(w)), ...(w.activities || []).flatMap(a => parseNotes(a.notes, actCtx(a)))];
+const LIFT_RANK = ['lift-pain', 'lift-cramp', 'lift-hard', 'lift-easy', 'lift-note'];
+const liftNote = (w, name) => workoutSigs(w).filter(x => x.about === name && LIFT_RANK.includes(x.k)).sort((a, b) => LIFT_RANK.indexOf(a.k) - LIFT_RANK.indexOf(b.k))[0] || null;
+// A rough day (tired or sick, in your notes) doesn't count as a miss, the same as a low-energy check-in.
+const offDay = w => workoutSigs(w).some(x => x.k === 'tired' || x.k === 'sick');
+// Signs in notes from a span of days before (and including) a date.
+function notedSince(date, back, kinds) {
+  const from = addDays(date, -back), out = [];
+  S.workouts.forEach(w => { if (w.date >= from && w.date <= date) workoutSigs(w).forEach(x => { if (kinds.includes(x.k)) out.push({ ...x, date: w.date }); }); });
+  return out.sort((a, b) => b.date.localeCompare(a.date));
+}
+// Sick in the last 2 days, and no check-in today to say otherwise: plan it like a low-energy day.
+function sickNoted(date) {
+  const mk = `${date}|${S.ver}`;
+  if (S.sickMemo && S.sickMemo.k === mk) return S.sickMemo.v;
+  const v = notedSince(addDays(date, -1), 1, ['sick'])[0] || null;
+  S.sickMemo = { k: mk, v };
+  return v;
+}
+// What's sore in your notes: sore for 2 days, pain for 4, offered on the "too sore" card.
+function soreFromNotes(date) {
+  const found = {};
+  [...notedSince(date, 2, ['sore-part']), ...notedSince(date, 4, ['pain-part'])].forEach(x => { if (!found[x.about]) found[x.about] = x; });
+  return found;
+}
+const MUSCLE_GROUP_NAME = Object.fromEntries(Object.entries(SORE_GROUPS).map(([k, [n]]) => [k, n.toLowerCase()]));
+const NOTE_LBL = { 'lift-pain': 'pain', 'lift-cramp': 'cramp', 'lift-hard': 'felt hard', 'lift-easy': 'felt easy', 'lift-note': 'shown next time' };
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+function noteLabel(x) {
+  if (NOTE_LBL[x.k]) return `${x.about} · ${NOTE_LBL[x.k]}`;
+  if (x.k === 'sore-part' || x.k === 'pain-part') return `${cap(x.word)} · ${x.k === 'pain-part' ? 'pain' : 'sore'}`;
+  if (x.k === 'run-part') return `${cap(x.word)} · next run`;
+  if (x.k === 'pace') return `${cap(x.word)} · pace`;
+  return cap(x.k === 'sore' ? x.word : x.k);
+}
+// What a tag does, in plain words, with when it applies.
+function noteInfo(x, date) {
+  const until = n => fmtDate(addDays(date, n), { weekday: 'short', month: 'short', day: 'numeric' });
+  const live = n => (addDays(date, n) >= todayStr() ? `On through ${until(n)}.` : 'That was a while ago, so it’s done now.');
+  const L = x.about, q = x.quote ? `From your note: “${x.quote}”` : '';
+  switch (x.k) {
+    case 'lift-easy': return { title: `${L} felt easy`, body: [`Next time you do ${L}, the coach treats it like you had reps to spare. Hit the top of your range on every set and the weight goes up two steps instead of one. Short of that, it aims for two more reps a set instead of one.`, `This lasts until you do ${L} again. After that, your next note for it (or none) takes over.`], q };
+    case 'lift-hard': return { title: `${L} felt hard`, body: [`Next time you do ${L}, the weight won’t go up, even if you hit your reps. You’ll match last time and own it first.`, 'If it was a rough day overall (tired or sick), write that too and the session won’t count as a miss.'], q };
+    case 'lift-pain': return { title: `Pain on ${L}`, body: [`Next time you do ${L}, the weight stays the same, and the lift shows a reminder to keep it light and stop if it hurts.`, 'If it keeps happening, tap ⋯ on the lift and pick an answer under “Does it bother you?”. The coach then goes easier on it every time.', 'Sharp pain, or pain that lasts more than a few days, is worth getting checked.'], q };
+    case 'lift-cramp': return { title: `Cramp on ${L}`, body: [`Next time you do ${L}, it shows a reminder: go a bit lighter and slower, and sip water between sets.`], q };
+    case 'lift-note': return { title: `Note for ${L}`, body: [`This line shows on ${L} next time, right under “Last time”, so your own cue is there when it matters.`, 'Words like easy, hard, heavy, pain, or cramp in the same sentence also change the plan for it.'], q };
+    case 'sore-part': return { title: `Sore ${x.word}`, body: [`Lifting days through ${until(2)} offer to work around your ${MUSCLE_GROUP_NAME[x.about]}: one tap, and lifts for it sit out while other muscles fill in.`, 'Soreness also tips the yoga pick toward Flexibility for 3 days.', live(2)], q };
+    case 'pain-part': return { title: `${cap(x.word)} pain`, body: [`Lifting days through ${until(4)} offer to work around your ${MUSCLE_GROUP_NAME[x.about]}: one tap, and lifts for it sit out while other muscles fill in.`, 'It also tips the yoga pick toward Flexibility for 3 days.', 'Sharp pain, or pain that lasts more than a few days, is worth getting checked.', live(4)], q };
+    case 'sore': return { title: 'Soreness', body: ['For 3 days, the yoga pick leans toward Flexibility to help you loosen up.', 'Name the spot (like “sore chest”) and lifting days can work around it too.', live(3)], q };
+    case 'run-part': return { title: `${cap(x.word)} on your run`, body: [`If this is your latest run, your next run (within 2 weeks) stays at the same distance on flat ground, with no speed work. It also starts with a balance drill: stand on one leg, 3 × 30 seconds a side.`, 'A run with no note like this brings the normal plan back.'], q };
+    case 'cramp': return { title: 'Cramps', body: [`Workouts through ${until(2)} start with a reminder to drink water and have something salty an hour or so before.`, live(2)], q };
+    case 'sick': return { title: 'Sick', body: ['This workout won’t count as a miss, so the coach won’t lower your weights because of it.', `Through ${until(2)}, if you skip the energy check-in, the plan treats you as low energy: 2 sets a lift, no weight jumps, and a walk instead of a run. Check in as OK or Great to go back to normal sooner.`, live(2)], q };
+    case 'tired': return { title: 'Tired', body: ['This workout won’t count as a miss, so one rough day doesn’t drag your weights down. Next time, each lift builds on your last normal session instead.'], q };
+    case 'pace': return { title: `${cap(x.word)} run`, body: ['Heat, hills, wind, and trails slow you down for reasons that aren’t fitness, so this one doesn’t count toward the pace your run suggestions use. The distance still counts.'], q };
+  }
+  return { title: noteLabel(x), body: [], q };
+}
+const NOTE_TONE = { 'lift-pain': 'warn', 'pain-part': 'warn', 'run-part': 'warn', sick: 'warn', 'lift-cramp': 'warn', cramp: 'warn', 'lift-easy': 'good', 'lift-hard': 'mid', tired: 'mid', 'sore-part': 'mid', sore: 'mid' };
+const noteTagsHTML = (sigs, id, wid, src) => `<div class="note-tags" id="${id}">${sigs.map((x, i) => `<button class="note-tag ${NOTE_TONE[x.k] || ''}" data-a="note-tag" data-wid="${wid}" data-src="${src}" data-i="${i}">${esc(noteLabel(x))}</button>`).join('')}</div>`;
+const fieldSigs = (w, src) => (src === 'w' ? parseNotes(w.notes, workoutCtx(w)) : parseNotes((w.activities[+src] || {}).notes, actCtx(w.activities[+src] || {})));
+function noteTagsFor(w, src) {
+  return noteTagsHTML(fieldSigs(w, src), `ntags-${w.id}-${src}`, w.id, src);
+}
 const round1 = v => Math.round(v * 10) / 10;
 const daysBetween = (a, b) => Math.round((parseYmd(b) - parseYmd(a)) / 864e5);
 const fmtHeight = inches => `${Math.floor(inches / 12)}′${inches % 12}″`;
@@ -1185,11 +1394,7 @@ function yogaHistory(before) {
   }
   return out;
 }
-function recentSoreness(date) {
-  const from = addDays(date, -3);
-  return S.workouts.some(w => w.date >= from && w.date <= date &&
-    (SORE_WORDS.test(w.notes || '') || (w.activities || []).some(a => SORE_WORDS.test(a.notes || ''))));
-}
+const recentSoreness = date => notedSince(date, 3, ['sore', 'sore-part', 'pain-part', 'lift-pain', 'run-part']).length > 0;
 // Picks a class from variety (what you haven't done lately), how you feel, soreness in your notes,
 // what you did yesterday (legs, upper body, a hard day) and lift tomorrow, whether you've done the hour this week, and how the last one felt.
 function recommendYoga(date) {
@@ -1254,7 +1459,13 @@ function cardioHistory(type, before) {
   for (const w of sortedW()) {
     if (before && w.date >= before) continue;
     const easyDay = /easy/i.test((planOf(w.dayKey) || {}).label || '');
-    (w.activities || []).forEach(a => { if (a.type === type && paceOf(a)) out.push({ date: w.date, dist: +a.dist, min: actMinutes(a), pace: paceOf(a), intervals: a.style === 'intervals', easyDay, notes: `${a.notes || ''} ${w.notes || ''}` }); });
+    const wSigs = parseNotes(w.notes, workoutCtx(w));
+    (w.activities || []).forEach(a => {
+      if (a.type !== type || !paceOf(a)) return;
+      const sigs = [...parseNotes(a.notes, actCtx(a)), ...wSigs];
+      // Hot, hilly, or windy in the notes: slower for reasons that aren't fitness, so it's left out of pace.
+      out.push({ date: w.date, dist: +a.dist, min: actMinutes(a), pace: paceOf(a), intervals: a.style === 'intervals', easyDay, skip: sigs.some(x => x.k === 'pace'), part: (sigs.find(x => x.k === 'run-part') || {}).word || '' });
+    });
   }
   return out;
 }
@@ -1268,13 +1479,14 @@ function recommendCardio(date, dayKey) {
   const runs = cardioHistory('run', date).filter(r => r.date >= addDays(date, -42));
   const walks = cardioHistory('walk', date);
   const talk = 'You should be able to talk in full sentences.';
-  if (energy === 'low') {
+  const sick = !energy && sickNoted(date);
+  if (energy === 'low' || sick) {
     const m = walks.length ? Math.round(sum(walks.slice(0, 5).map(x => x.min)) / Math.min(5, walks.length)) : 20;
-    return { type: 'walk', text: `Easy walk, about ${m} min`, why: 'Energy is low, so a walk keeps you moving and still counts for your streak.' };
+    return { type: 'walk', text: `Easy walk, about ${m} min`, why: sick ? `You noted being sick ${sick.date === addDays(date, -1) ? 'yesterday' : 'recently'}, so an easy walk keeps you moving without pushing it. It still counts for your streak.` : 'Energy is low, so a walk keeps you moving and still counts for your streak.' };
   }
   if (!runs.length) {
     // Back after a break from running: half your usual distance, easy, then build.
-    const older = cardioHistory('run', date).filter(r => !r.intervals).slice(0, 5);
+    const older = cardioHistory('run', date).filter(r => !r.intervals && !r.skip).slice(0, 5);
     if (older.length) {
       const d = round1(Math.max(1, sum(older.map(r => r.dist)) / older.length / 2)), p = sum(older.map(r => r.pace)) / older.length + 0.5;
       return { type: 'run', dist: d, pace: p, text: `Easy run: ${d} mi at about ${fmtPace(p)} /mi`, why: `Back to running after ${Math.round(daysBetween(older[0].date, date) / 7)} weeks, so start with about half your usual distance. Add up to 10% each run from here. ${talk}` };
@@ -1282,10 +1494,10 @@ function recommendCardio(date, dayKey) {
     if (walks.length >= 3) return { type: 'run', text: 'Run/walk for 20 min: jog 1 minute, walk 90 seconds, 8 times', why: "You've been walking steadily, so you're ready to mix in some jogging. As it gets easier, make the jogs longer." };
     return { type: 'walk', text: 'Walk 20 to 30 min at a comfortable pace', why: 'Log the distance and time, and future suggestions build from what you do.' };
   }
-  const steady = runs.filter(r => !r.intervals), recent = (steady.length ? steady : runs).slice(0, 5);
+  const steady = runs.filter(r => !r.intervals && !r.skip), recent = (steady.length ? steady : runs.filter(r => !r.skip).length ? runs.filter(r => !r.skip) : runs).slice(0, 5);
   const avg = sum(recent.map(r => r.pace)) / recent.length;
   // Something felt off on the last run (ankle, knee, shin): same distance, flat ground, no speed work.
-  const sorePart = runs[0].date >= addDays(date, -14) && (runs[0].notes.match(/\b(ankle|knee|shin|foot|calf|hip)\b/i) || [])[1];
+  const sorePart = runs[0].date >= addDays(date, -14) && runs[0].part;
   if (sorePart) {
     const d = round1(runs[0].dist);
     return { type: 'run', dist: d, pace: avg + 0.5, text: `Same distance as last time: ${d} mi on flat ground`, why: `You noted your ${sorePart.toLowerCase()} last run, so no step up today and no speed work. Before you go: balance on one leg, 3 × 30 seconds a side. Stop if it hurts.` };
@@ -1458,6 +1670,7 @@ function viewToday() {
     </header>
     ${welcomeCard()}
     ${todaySummary(date, w)}
+    ${noteBanner(date)}
     ${comebackCard(w)}
     ${w.type === 'strength' && deloadState(date).active ? deloadCard(date) : ''}
     ${weekChips(date)}
@@ -1568,7 +1781,7 @@ function exBlock(w, i, letter) {
     <div class="ex-head">
       <div>
         <div class="ex-name">${letter ? `<span class="ss-letter">${letter}</span>` : ''}${esc(e.name)}</div>
-        <div class="ex-target">${esc(targetText(e.target))}</div>
+        <div class="ex-target">${esc(targetText(e.target))}${isLive(w) && e.target.sets && e.sets.length !== e.target.sets ? ` · <b>${e.sets.length} ${e.sets.length === 1 ? 'set' : 'sets'} today</b>` : ''}</div>
       </div>
       <div class="ex-btns">
         <a class="icon-btn" href="${formUrl(e.name)}" target="_blank" rel="noopener" aria-label="How to do it">${ic('play')}</a>
@@ -1577,6 +1790,7 @@ function exBlock(w, i, letter) {
       </div>
     </div>
     <div class="ex-last">${lastTxt}</div>
+    ${last && last.note && last.note.quote ? `<div class="ex-note">“${esc(last.note.quote)}”<span>Your note, ${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}</span></div>` : ''}
     ${banner}
     ${warmupFor(w, i) ? `<div class="warmup">${esc(warmupFor(w, i))}</div>` : ''}
     <div class="sets">${rows}</div>
@@ -1609,6 +1823,8 @@ function notesCard(w) {
   return `<div class="card">
     <label class="lbl" for="notes-${w.id}">Workout notes</label>
     <textarea class="inp" id="notes-${w.id}" data-wid="${w.id}" data-wb="notes" placeholder="Pain, form cues, energy, how it felt…">${esc(w.notes)}</textarea>
+    ${noteTagsFor(w, 'w')}
+    ${fieldSigs(w, 'w').length ? '' : `<div class="sh-hint">Try “bench felt easy”, “sore chest”, “knee hurt”, or “tired today”. Words the coach acts on show as tags, and you can tap one to see what it changes.</div>`}
   </div>`;
 }
 
@@ -1676,6 +1892,7 @@ function yogaCard(w, a, k) {
     <label class="lbl">How did it feel?</label>${actSeg(w, k, a, 'feel', [['easy', 'Easy'], ['right', 'Just right'], ['hard', 'Hard']])}
     <label class="lbl">Notes</label>
     <input class="inp" data-wid="${w.id}" data-wb="activities.${k}.notes" value="${esc(a.notes)}" placeholder="Tight, sore, or great?">
+    ${noteTagsFor(w, k)}
     <div class="act-stats" id="act-stats-${k}">${actStatsText(a, w.date)}</div>
   </div>`;
 }
@@ -1702,6 +1919,7 @@ function moveCard(w, a, k, rec) {
     ${sug ? `<div class="sh-hint">Suggested today: ${sug.dist} mi at about ${fmtPace(sug.pace)} /mi</div>` : ''}
     <label class="lbl">Notes</label>
     <input class="inp" data-wid="${w.id}" data-wb="activities.${k}.notes" value="${esc(a.notes)}" placeholder="Route, how it felt">
+    ${noteTagsFor(w, k)}
   </div>`;
 }
 
@@ -1721,6 +1939,7 @@ function otherCard(w, a, k) {
     <div class="act-stats" id="act-stats-${k}">${actStatsText(a, w.date) || 'Enter how long it took to see calories.'}</div>
     <label class="lbl">Notes</label>
     <input class="inp" data-wid="${w.id}" data-wb="activities.${k}.notes" value="${esc(a.notes)}" placeholder="Where, how it felt">
+    ${noteTagsFor(w, k)}
   </div>`;
 }
 
@@ -2583,9 +2802,17 @@ function renderSheet() {
   if (!S.sheet) { el.hidden = true; document.body.classList.remove('sheet-open'); return; }
   el.hidden = false;
   document.body.classList.add('sheet-open');
-  $('#sheet-panel').innerHTML = ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, past: pastSheetHTML })[S.sheet.kind]();
+  $('#sheet-panel').innerHTML = ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
 }
 
+function infoSheetHTML() {
+  const sh = S.sheet;
+  return `<div class="sh-grip"></div>
+    <div class="sh-title">${esc(sh.title)}<span>What the coach does with it</span></div>
+    ${sh.q ? `<div class="ex-note" style="margin:0 0 12px">${esc(sh.q)}</div>` : ''}
+    <div class="info-body">${sh.body.map(p => `<p>${esc(p)}</p>`).join('')}</div>
+    <button class="btn block" data-a="sheet-close">Got it</button>`;
+}
 function pastSheetHTML() {
   const opt = (k, name, sub) => `<button class="row" data-a="past-make" data-k="${k}"><div><b>${esc(name)}</b><small>${esc(sub)}</small></div>${ic('chev')}</button>`;
   return `<div class="sh-grip"></div>
@@ -3392,6 +3619,13 @@ const ACT = {
     w.exercises.forEach(e => e.sets.forEach((x, k) => { if (!x.done && x.w !== '' && x.r !== '') { x.done = true; x.at = at + k; } }));
     persist(w); render(); toast('Logged.');
   },
+  'note-tag': d => {
+    const w = getW(d.wid), x = w && fieldSigs(w, d.src)[+d.i];
+    if (!x) return;
+    const info = noteInfo(x, w.date);
+    S.sheet = { kind: 'info', title: info.title, body: info.body, q: info.q };
+    renderSheet();
+  },
   'sore-tog': d => {
     const b = bodyEntry(todayStr()), cur = soreFor(b.date);
     b.sore = cur.includes(d.g) ? cur.filter(g => g !== d.g) : [...cur, d.g];
@@ -3475,6 +3709,9 @@ document.addEventListener('input', ev => {
       setPath(w, el.dataset.wb, el.value);
       const m = el.dataset.wb.match(/^activities\.(\d+)\.(\w+)/);
       if (m) actTimeSync(w, +m[1], m[2]);
+      const src = el.dataset.wb === 'notes' ? 'w' : m && m[2] === 'notes' ? m[1] : null;
+      const tags = src != null && document.getElementById(`ntags-${w.id}-${src}`);
+      if (tags) tags.outerHTML = noteTagsFor(w, src);
       saveSoon(w);
       const box = m && document.getElementById(`act-stats-${m[1]}`);
       if (box) box.textContent = actStatsText(w.activities[+m[1]], w.date) || 'Enter distance and time to see pace and calories.';
