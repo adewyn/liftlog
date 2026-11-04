@@ -3,6 +3,7 @@
 // or did anything (no workout data). Every 15 minutes it sends:
 //   - the weigh-in reminder, unless they've already weighed in that day
 //   - the streak saver, unless they've already done something that day
+//   - on the 1st of the month, the check-in day reminder (measurements, plus photos every 3 months)
 // The pushes carry no data; the app's sw.js works out which one it is and what to say.
 
 const ALLOWED_ORIGINS = ['https://adewyn.github.io', 'http://localhost:8790'];
@@ -34,7 +35,7 @@ export default {
       try { host = new URL(body.sub.endpoint).hostname; } catch { return reply({ error: 'bad subscription' }, 400); }
       if (!PUSH_HOSTS.some(r => r.test(host))) return reply({ error: 'unknown push service' }, 400);
       const hhmm = /^\d{2}:\d{2}$/;
-      if (!hhmm.test(body.time || '') || (body.streakTime && !hhmm.test(body.streakTime))) return reply({ error: 'bad time' }, 400);
+      if (!hhmm.test(body.time || '') || (body.streakTime && !hhmm.test(body.streakTime)) || (body.measureTime && !hhmm.test(body.measureTime))) return reply({ error: 'bad time' }, 400);
       try { localNow(body.tz); } catch { return reply({ error: 'bad time zone' }, 400); }
       if (!subs[id] && Object.keys(subs).length >= MAX_SUBS) return reply({ error: 'server is full' }, 503);
       const old = subs[id] || {};
@@ -42,7 +43,8 @@ export default {
         endpoint: body.sub.endpoint, tz: body.tz,
         time: body.time, weighOn: body.weighOn !== false,
         streakTime: body.streakTime || '14:00', streakOn: !!body.streakOn,
-        lastSent: old.lastSent || '', lastStreak: old.lastStreak || '', weighed: old.weighed || '', active: old.active || '',
+        measureTime: body.measureTime || '10:00', measureOn: !!body.measureOn,
+        lastSent: old.lastSent || '', lastStreak: old.lastStreak || '', lastMeasure: old.lastMeasure || '', weighed: old.weighed || '', active: old.active || '',
       };
       await saveSubs(env, subs);
       return reply({ ok: true });
@@ -82,11 +84,12 @@ export default {
       let field = null;
       if (s.weighOn !== false && due(s.time) && s.lastSent !== date && s.weighed !== date) field = 'lastSent';
       else if (s.streakOn && due(s.streakTime || '14:00') && s.lastStreak !== date && s.active !== date) field = 'lastStreak';
+      else if (s.measureOn && date.endsWith('-01') && due(s.measureTime || '10:00') && s.lastMeasure !== date.slice(0, 7)) field = 'lastMeasure';
       if (!field) continue;
       try {
         const res = await sendPush(env, s.endpoint);
         if (res.gone) gone.push(id);
-        else if (res.ok) sent[id] = { [field]: date };
+        else if (res.ok) sent[id] = { [field]: field === 'lastMeasure' ? date.slice(0, 7) : date };
       } catch { /* try again next run */ }
     }
     if (!gone.length && !Object.keys(sent).length) return;

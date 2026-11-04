@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -12,7 +12,7 @@ const DEFAULT_SETTINGS = {
   profile: { heightIn: 75 }, yogaLevel: 'beginner',
   goal: 'maintain', creatine: true, deloadUntil: null, deloadLast: null, deloadSnooze: null,
   proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
-  reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', id: null },
+  reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', measureOn: false, measureTime: '10:00', id: null },
 };
 // The weigh-in reminder server (server/push in this folder) and its public key.
 const PUSH_URL = 'https://liftlog-push.sporebound.workers.dev';
@@ -985,7 +985,7 @@ function celebrateDay() {
   }
   S.celebrated = { date: today, done };
   // Tell the reminder server today counts (once a day), and leave the streak where sw.js can read it.
-  if (done && S.activePinged !== today && S.settings.reminder.id && (S.settings.reminder.on || S.settings.reminder.streakOn)) {
+  if (done && S.activePinged !== today && S.settings.reminder.id && remAny(S.settings.reminder)) {
     S.activePinged = today;
     pushApi('active', { id: S.settings.reminder.id }).catch(() => { S.activePinged = null; });
   }
@@ -2070,8 +2070,8 @@ function photoCard() {
   return `<h2>Progress photos</h2>
     <div class="card">
       ${ps.length ? `<div class="photos">${ps.slice(0, 9).map(p => `<button data-a="photo-open" data-id="${p.id}" aria-label="Photo from ${esc(fmtDate(p.date))}"><img src="${photoUrl(p)}" alt=""><span>${esc(fmtDate(p.date, { month: 'short', day: 'numeric' }))}</span></button>`).join('')}</div>` : ''}
-      <button class="btn block" data-a="photo-add">+ Add a photo</button>
-      <div class="sh-hint">Same spot, same light, once a month. Photos stay on this phone and aren't in backups.</div>
+      <button class="btn ${!ps.length || ps[0].date <= addDays(todayStr(), -85) ? 'pri' : ''} block" data-a="photo-add">${ps.length && ps[0].date <= addDays(todayStr(), -85) ? '+ Time for new photos' : '+ Add a photo'}</button>
+      <div class="sh-hint">Same spot, same light, every 3 months. Photos stay on this phone and aren't in backups.</div>
     </div>`;
 }
 function photoSheetHTML() {
@@ -2502,7 +2502,9 @@ function reminderCard() {
     body = `${row('on', 'Weigh-in', 'A morning nudge to weigh in. Skipped if you already did.', 'rem-time', r.time)}
       <div style="height:16px"></div>
       ${row('streakOn', 'Streak saver', "An evening nudge, only if today doesn't count for your streak yet.", 'rem-streak-time', r.streakTime)}
-      ${r.on || r.streakOn ? '<button class="btn block" style="margin-top:14px" data-a="rem-test">Send a test</button>' : ''}`;
+      <div style="height:16px"></div>
+      ${row('measureOn', 'Check-in day', 'On the 1st of each month: take your measurements. Every 3 months (January, April, July, and October) it adds progress photos.', 'rem-measure-time', r.measureTime)}
+      ${remAny(r) ? '<button class="btn block" style="margin-top:14px" data-a="rem-test">Send a test</button>' : ''}`;
   }
   return `<h2>Reminders</h2><div class="card">${body}</div>`;
 }
@@ -2753,6 +2755,7 @@ const isStandalone = () => navigator.standalone || matchMedia('(display-mode: st
 const fmtTime = t => { const [h, m] = t.split(':').map(Number); return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
 const b64uBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), ch => ch.charCodeAt(0));
 
+const remAny = r => !!(r.on || r.streakOn || r.measureOn);
 async function pushApi(path, body) {
   const res = await fetch(`${PUSH_URL}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
@@ -2767,14 +2770,14 @@ async function reminderSync() {
   r.id = r.id || uid('r');
   await pushApi('subscribe', {
     id: r.id, sub: sub.toJSON(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    time: r.time, weighOn: r.on, streakTime: r.streakTime, streakOn: r.streakOn,
+    time: r.time, weighOn: r.on, streakTime: r.streakTime, streakOn: r.streakOn, measureTime: r.measureTime, measureOn: !!r.measureOn,
   });
   if (dayCounts(todayStr())) { S.activePinged = todayStr(); await pushApi('active', { id: r.id }); }
 }
 async function reminderToggle(k) {
   const r = S.settings.reminder;
-  const name = k === 'on' ? 'Weigh-in reminder' : 'Streak saver';
-  const time = k === 'on' ? r.time : r.streakTime;
+  const name = { on: 'Weigh-in reminder', streakOn: 'Streak saver', measureOn: 'Check-in day' }[k];
+  const time = { on: r.time, streakOn: r.streakTime, measureOn: r.measureTime }[k];
   if (!r[k]) {
     try {
       const perm = await Notification.requestPermission();
@@ -2782,7 +2785,7 @@ async function reminderToggle(k) {
       r[k] = true;
       await reminderSync();
       saveSettings(); render();
-      toast(`${name} set for ${fmtTime(time)}`);
+      toast(`${name} set for ${k === 'measureOn' ? 'the 1st at ' : ''}${fmtTime(time)}`);
     } catch (err) {
       r[k] = false;
       render();
@@ -2793,19 +2796,19 @@ async function reminderToggle(k) {
   r[k] = false;
   saveSettings(); render();
   toast(`${name} off`);
-  if (r.on || r.streakOn) { reminderSync().catch(() => {}); return; }
+  if (remAny(r)) { reminderSync().catch(() => {}); return; }
   try { if (r.id) await pushApi('unsubscribe', { id: r.id }); } catch (err) { /* offline: the server drops it once pushes start failing */ }
   try { const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (sub) await sub.unsubscribe(); } catch (err) { /* ignore */ }
 }
 function reminderWeighed() {
   const r = S.settings.reminder;
-  if ((r.on || r.streakOn) && r.id) pushApi('weighed', { id: r.id }).catch(() => {});
+  if (remAny(r) && r.id) pushApi('weighed', { id: r.id }).catch(() => {});
 }
 function reminderTimeChanged(field, value) {
   const r = S.settings.reminder;
   r[field] = value;
   saveSettings();
-  if (r.on || r.streakOn) reminderSync().then(() => toast(`Moved to ${fmtTime(value)}`)).catch(err => toast(`Couldn't update: ${err.message}`));
+  if (remAny(r)) reminderSync().then(() => toast(`Moved to ${fmtTime(value)}`)).catch(err => toast(`Couldn't update: ${err.message}`));
 }
 
 // ---------- backup ----------
@@ -3512,6 +3515,8 @@ document.addEventListener('change', ev => {
     reminderTimeChanged('time', el.value);
   } else if (el.id === 'rem-streak-time' && el.value) {
     reminderTimeChanged('streakTime', el.value);
+  } else if (el.id === 'rem-measure-time' && el.value) {
+    reminderTimeChanged('measureTime', el.value);
   } else if (el.id === 'import-file') {
     importData(el.files[0]);
     el.value = '';
@@ -3569,7 +3574,7 @@ document.addEventListener('visibilitychange', () => {
       if (ev.data && ev.data.open) { S.tab = ev.data.open; S.view = null; S.bodyDate = todayStr(); S.pickDay = null; S.dayView = null; closeSheet(); render(); scrollTo(0, 0); }
     });
   }
-  if ((S.settings.reminder.on || S.settings.reminder.streakOn) && navigator.onLine) reminderSync().catch(() => {});
+  if (remAny(S.settings.reminder) && navigator.onLine) reminderSync().catch(() => {});
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }

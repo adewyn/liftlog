@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v17';
+const CACHE = 'liftlog-v18';
 const ASSETS = [
   './',
   './index.html',
@@ -82,16 +82,53 @@ function readKv(keys) {
   });
 }
 
+// What this phone has already shown (weigh-in and streak by day, check-in by month), kept in its own
+// small database so it never touches the app's data.
+function swMeta(val) {
+  return new Promise(res => {
+    const r = indexedDB.open('liftlog-sw', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('meta');
+    r.onerror = () => res({});
+    r.onsuccess = () => {
+      try {
+        const db = r.result, t = db.transaction('meta', val ? 'readwrite' : 'readonly'), st = t.objectStore('meta');
+        let out = val || {};
+        if (val) st.put(val, 'shown');
+        else { const q = st.get('shown'); q.onsuccess = () => { out = q.result || {}; }; }
+        t.oncomplete = () => { db.close(); res(out); };
+        t.onerror = () => res(out);
+      } catch (err) { res({}); }
+    };
+  });
+}
+
 async function reminderText() {
   const kv = await readKv(['settings', 'streak', 'program']);
   const today0 = ymd(new Date()), weighed = await readBody(today0);
   const r = (kv.settings && kv.settings.reminder) || {};
   const now = new Date(), mins = now.getHours() * 60 + now.getMinutes();
   const today = ymd(now), yesterday = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
-  // Pushes carry no data: pick the reminder whose time is closest. Already weighed in today, or a tie,
-  // means it's the streak saver (the server skips the weigh-in reminder once you've weighed in).
-  const streakPush = r.streakOn && (!r.on || weighed || Math.abs(mins - toMin(r.streakTime)) <= Math.abs(mins - toMin(r.time)));
-  if (!streakPush) return { title: 'Time to weigh in', body: 'Step on the scale and log it in Lift Log.', url: './#body' };
+  const month = today.slice(0, 7), first = now.getDate() === 1;
+  // Pushes carry no data, so work out which one it is the way the server picks: the first reminder
+  // whose hour has started and that hasn't gone out yet today (or this month, for check-in day).
+  const shown = await swMeta();
+  const due = t => { const m = toMin(t); return mins >= m && mins < m + 60; };
+  let kind = r.on && due(r.time || '09:00') && !weighed && shown.weigh !== today ? 'weigh'
+    : r.streakOn && due(r.streakTime || '14:00') && shown.streak !== today ? 'streak'
+    : r.measureOn && first && due(r.measureTime || '10:00') && shown.measure !== month ? 'measure' : null;
+  if (!kind) {
+    // Clock drift: fall back to whichever enabled reminder's time is closest.
+    const opts = [r.on && !weighed && ['weigh', r.time], r.streakOn && ['streak', r.streakTime], r.measureOn && first && ['measure', r.measureTime]].filter(Boolean);
+    kind = (opts.sort((a, b) => Math.abs(mins - toMin(a[1])) - Math.abs(mins - toMin(b[1])))[0] || ['streak'])[0];
+  }
+  await swMeta({ ...shown, [kind === 'measure' ? 'measure' : kind]: kind === 'measure' ? month : today });
+  if (kind === 'weigh') return { title: 'Time to weigh in', body: 'Step on the scale and log it in Lift Log.', url: './#body' };
+  if (kind === 'measure') {
+    // Photos every 3 months: January, April, July, and October.
+    return now.getMonth() % 3 === 0
+      ? { title: 'Check-in day 📏📸', body: 'Take your measurements and new progress photos. Same spot and light as last time.', url: './#body' }
+      : { title: 'Check-in day 📏', body: 'Time for your monthly measurements: waist, chest, arms, and thighs.', url: './#body' };
+  }
   const st = kv.streak || {};
   if (st.date === today && st.done) return { title: 'Today already counts 🔥', body: 'Nice work. See you tomorrow.', url: './' };
   // The streak at stake: what the app saw today, or yesterday's if that day counted.
