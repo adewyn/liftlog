@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.5.1';
+const APP_VERSION = '2.6.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -655,11 +655,11 @@ const MUSCLE_RULES = [
   [/pallof|crunch|leg raise|plank|\babs\b|sit-?up|ab wheel|woodchop/i, { abs: 1 }],
   [/calf/i, { calves: 1 }],
   [/hamstring|leg curl|nordic/i, { hams: 1 }],
-  [/romanian|\brdl\b|good morning|stiff.?leg/i, { hams: 1, glutes: 0.5 }],
+  [/romanian|\brdl\b|good morning|stiff.?leg/i, { hams: 1, glutes: 0.5, back: 0.5 }],
   [/(hex|trap).?bar deadlift/i, { quads: 0.5, hams: 0.5, glutes: 0.5, back: 0.5 }],
   [/deadlift/i, { hams: 0.5, glutes: 0.5, back: 0.5 }],
   [/sled/i, { quads: 0.5, glutes: 0.5 }],
-  [/hip thrust|glute bridge|glute kickback/i, { glutes: 1 }],
+  [/hip thrust|glute bridge|glute kickback/i, { glutes: 1, hams: 0.5 }],
   [/abduct/i, { glutes: 0.5 }],
   [/leg extension/i, { quads: 1 }],
   [/squat|leg press|lunge|step-?up/i, { quads: 1, glutes: 0.5 }],
@@ -668,9 +668,149 @@ const MUSCLE_RULES = [
   [/curl/i, { biceps: 1 }],
   [/pushdown|push-down|triceps|skull|kickback|french press|close-grip/i, { triceps: 1 }],
   [/fly|flye|crossover|pec deck/i, { chest: 1 }],
-  [/bench|chest press|\bdips?\b|push-?up|incline|decline|floor press|free press|machine press|d(umb)?b(ell)? press|dumbbell chest/i, { chest: 1, triceps: 0.5 }],
+  [/bench|chest press|\bdips?\b|push-?up|incline|decline|floor press|free press|machine press|d(umb)?b(ell)? press|dumbbell chest/i, { chest: 1, triceps: 0.5, shoulders: 0.5 }],
+  [/farmer|suitcase carry|\bcarry\b/i, { back: 0.5, abs: 0.5 }],
 ];
 const musclesOf = name => { const n = normName(name); return (MUSCLE_RULES.find(([re]) => re.test(n)) || [null, {}])[1]; };
+
+// ---------- muscle map ----------
+// A front and back body drawn on a 100 × 214 grid. Each side is drawn once (x under 50) and mirrored,
+// so both halves always match. Muscle shapes carry the same names as MUSCLES.
+const mirrorPath = d => d.replace(/(-?[\d.]+),(-?[\d.]+)/g, (_, x, y) => `${+(100 - x).toFixed(1)},${y}`);
+const BODY = {
+  front: {
+    sil: 'M50,27 L45,27 Q44,31 43,32 Q37,33 31,35 Q24,37 22.5,45 Q21.5,55 21,64 Q20,72 18.5,80 Q16.5,90 15,99 Q13.5,104 12.5,110 Q12,116 15,117 Q17,116 17.5,111 Q19,106 20.5,101 Q23.5,92 26,83 Q28,75 29.5,67 Q31,60 32.5,58 Q33.5,68 34.5,78 Q35,88 33.5,98 Q32,108 32,118 Q31.5,133 33,146 Q33.5,152 33.5,156 Q32,166 33,178 Q34,190 35.5,198 Q35,203 33.5,205 Q34,208 40,208 Q44,207 43.5,202 Q43,198 43.5,192 Q45,178 45,166 Q45,158 45.5,152 Q47,140 47.5,128 Q48.5,118 50,114',
+    head: 'M50,1.5 Q41,1.5 40.5,12 Q40.5,21 45,25.5 Q47.5,27.5 50,27.5',
+    parts: [
+      ['back', 'M45,29.5 Q41,32.5 35.5,34.5 Q40,36 44,36 Q46,33 46.5,30 Z'],
+      ['shoulders', 'M34.5,35.5 Q27,36.5 24.5,42.5 Q23,48.5 24,54.5 Q27,51 29.5,47.5 Q33,41.5 38.5,38.5 Q37,36.5 34.5,35.5 Z'],
+      ['chest', 'M49,38.5 Q43.5,37 39.5,38.5 Q33.5,42 31.5,50 Q31.5,56.5 36.5,59 Q42.5,61 49,58.5 Z'],
+      ['biceps', 'M24.5,57 Q22.5,63 22.5,70 Q23.5,73.5 26.5,72.5 Q29.5,66.5 30.5,59 Q31,55 29.5,52.5 Q26,53.5 24.5,57 Z'],
+      ['abs', 'M37,61.5 Q35,72 35.5,84 Q36,92 39.5,98 Q41.5,94 41.5,86 Q41.5,73 40,62 Z'],
+      ['quads', 'M34.5,108 Q32.5,120 33.5,134 Q34.5,144 37.5,149 Q40.5,150.5 43,148 Q46,138 47,126 Q47.5,117 45,111 Q40,108 34.5,108 Z'],
+      ['calves', 'M35,158 Q33.5,168 34.5,180 Q35.5,188 37.5,192 Q39.5,190 40.5,182 Q41.5,170 40.5,159 Q37.5,155 35,158 Z'],
+    ],
+    center: [['abs', 'M43.5,61.5 L56.5,61.5 Q57.5,76 56.5,92 Q53.5,100 50,101 Q46.5,100 43.5,92 Q42.5,76 43.5,61.5 Z']],
+    lines: 'M50,62 L50,100 M44,70 L56,70 M43.7,78.5 L56.3,78.5 M43.8,87 L56.2,87',
+  },
+  back: {
+    head: 'M50,1.5 Q41,1.5 40.5,12 Q40.5,21 45,25.5 Q47.5,27.5 50,27.5',
+    parts: [
+      ['back', 'M50,26 Q47,29.5 44,31.5 Q39,34 35,35.5 Q40,38.5 43,42 Q47,50 49.5,60 L50,60 Z'],
+      ['rear', 'M34.5,35.5 Q27,36.5 24.5,42.5 Q23,48.5 24,54.5 Q27,51 29.5,47.5 Q32.5,42 37.5,39.5 Q36.5,37 34.5,35.5 Z'],
+      ['triceps', 'M24.5,57 Q22.5,63 22.5,70 Q23.5,73.5 26.5,72.5 Q29.5,66.5 30.5,59 Q31,55 29.5,52.5 Q26,53.5 24.5,57 Z'],
+      ['back', 'M38,42 Q33.5,48 33.5,58 Q34,70 37.5,79 Q42,86 48.5,88 L48.5,64 Q46,50 42.5,43.5 Q40,41.5 38,42 Z'],
+      ['back', 'M41,90 Q44.5,91 48.5,91.5 L48.5,103 Q44.5,102.5 40.5,100.5 Q39.5,95 41,90 Z'],
+      ['glutes', 'M49,105 Q41,103.5 36,107 Q32.5,112 33.5,119 Q35.5,126 42,127 Q47,127 49,123.5 Z'],
+      ['hams', 'M34,129 Q32.5,138 33.5,146 Q35,151 38.5,152 Q41.5,149 43.5,142 Q46,135 46.5,129.5 Q41,130.5 34,129 Z'],
+      ['calves', 'M34.5,157 Q32.5,165 33.5,174 Q35,180.5 38.5,181 Q42,180.5 43,173 Q43.5,164 42,157.5 Q38,154 34.5,157 Z'],
+    ],
+    center: [],
+    lines: 'M50,62 L50,104',
+  },
+};
+BODY.back.sil = BODY.front.sil;
+const BODY_SIDE = { chest: 'front', shoulders: 'front', biceps: 'front', abs: 'front', quads: 'front', back: 'back', rear: 'back', triceps: 'back', glutes: 'back', hams: 'back', calves: 'back' };
+const LOWER_M = new Set(['quads', 'hams', 'glutes', 'calves']);
+// Where each muscle sits from top to bottom on the 214-tall body, for zooming a small picture in.
+const MUSCLE_Y = { back: [26, 104], rear: [35, 55], triceps: [52, 73], chest: [37, 61], shoulders: [35, 55], biceps: [52, 73], abs: [61, 101], glutes: [103, 127], hams: [129, 152], quads: [108, 150], calves: [155, 192] };
+// How lit a muscle is: main muscles (worked directly) start dim and glow as sets get checked off;
+// helping muscles do the same, softer. state = { m: { role: 'main' | 'help', p: 0..1 } }
+function muscleOpacity(st, floor = 0) {
+  if (!st) return 0;
+  return st.role === 'main' ? Math.max(floor, 0.2) + st.p * (1 - Math.max(floor, 0.2)) : 0.12 + floor / 2 + st.p * (0.43 - floor / 2);
+}
+// One body view as SVG. key names it so the light-up can animate from where it was last time.
+const bodyLast = {};
+function bodySVG(side, state, key, opts = {}) {
+  const b = BODY[side], vb = opts.vb || '0 0 100 214';
+  const seen = {};
+  const part = (m, d) => {
+    const st = state[m], o = muscleOpacity(st, opts.floor), id = `${key}:${side}:${m}`;
+    const from = seen[id] ?? (seen[id] = bodyLast[id] ?? (st ? muscleOpacity({ ...st, p: 0 }, opts.floor) : 0));
+    bodyLast[id] = o;
+    return `<path class="bm-m${st ? ` ${st.role}` : ''}${st && st.p >= 1 ? ' lit' : ''}" d="${d}"${st ? ` style="fill-opacity:${from.toFixed(3)}" data-o="${o.toFixed(3)}"` : ''}/>`;
+  };
+  const both = d => `${d} Z ${mirrorPath(d)} Z`;
+  return `<svg class="bm${opts.cls ? ` ${opts.cls}` : ''}" viewBox="${vb}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <path class="bm-sil" d="${both(b.sil)} ${both(b.head)}"/>
+    ${b.parts.map(([m, d]) => part(m, d) + part(m, mirrorPath(d))).join('')}
+    ${b.center.map(([m, d]) => part(m, d)).join('')}
+    <path class="bm-line" d="${b.lines}"/>
+  </svg>`;
+}
+
+// The muscles a set of lifts works: main where any lift hits it directly, helping otherwise.
+// p is the share of that muscle's sets checked off (helping sets count half).
+function muscleState(exs) {
+  const plan = {}, done = {}, role = {};
+  exs.forEach(e => {
+    const ms = Object.entries(musclesOf(e.name)), top = Math.max(0, ...ms.map(([, f]) => f));
+    ms.forEach(([m, f]) => {
+      plan[m] = (plan[m] || 0) + f * e.sets.length;
+      done[m] = (done[m] || 0) + f * e.sets.filter(s => s.done).length;
+      // A lift with no direct muscle (like a carry) still counts its biggest one as main.
+      if (f >= 1 || f === top) role[m] = 'main'; else if (!role[m]) role[m] = 'help';
+    });
+  });
+  const st = {};
+  Object.keys(plan).forEach(m => { if (plan[m] > 0) st[m] = { role: role[m], p: Math.min(1, done[m] / plan[m]) }; });
+  return st;
+}
+const byRole = st => ['main', 'help'].map(r => Object.keys(MUSCLES).filter(m => st[m] && st[m].role === r));
+function muscleChips(st) {
+  const [main, help] = byRole(st);
+  const chip = m => `<span class="bm-chip ${st[m].role}${st[m].p >= 1 ? ' lit' : ''}" style="--p:${Math.round(st[m].p * 100)}%">${MUSCLES[m]}</span>`;
+  return `<div class="bc-row"><span class="bc-key main">Main</span>${main.map(chip).join('')}</div>
+    ${help.length ? `<div class="bc-row"><span class="bc-key help">Helping</span>${help.map(chip).join('')}</div>` : ''}`;
+}
+// The lift you're on: the first one with sets left (or the last one once everything's done).
+const currentLift = w => { const i = w.exercises.findIndex(e => e.sets.some(s => !s.done)); return i >= 0 ? i : w.exercises.length - 1; };
+// The day's body map: every muscle today's lifts work, lighting up as sets get checked off.
+// While you're lifting, switch to just the lift you're on.
+function bodyCard(w) {
+  if (!w.exercises.some(e => Object.keys(musclesOf(e.name)).length)) return '';
+  const live = isLive(w) && w.exercises.some(e => e.sets.some(s => !s.done));
+  const mode = live && S.settings.bodyView === 'lift' ? 'lift' : 'day';
+  const ce = w.exercises[currentLift(w)];
+  const st = muscleState(mode === 'lift' ? [ce] : w.exercises);
+  if (!Object.keys(st).length) return '';
+  const key = `w:${w.id}:${mode}${mode === 'lift' ? `:${ce.key}` : ''}`;
+  const done = Object.values(st).filter(x => x.role === 'main' && x.p >= 1).length, mains = Object.values(st).filter(x => x.role === 'main').length;
+  return `<div class="card body-card">
+    <div class="bc-head">
+      <div><div class="lbl" style="margin:0">${mode === 'lift' ? 'Up now' : live ? 'Muscles today' : 'Muscles worked'}</div>
+      <div class="bc-sub">${mode === 'lift' ? esc(ce.name) : live ? `${done} of ${mains} main muscles done` : `${mains} main ${mains === 1 ? 'muscle' : 'muscles'}`}</div></div>
+    </div>
+    ${live ? `<div class="seg bc-seg"><button class="${mode === 'day' ? 'on' : ''}" data-a="bm-view" data-v="day">Whole day</button><button class="${mode === 'lift' ? 'on' : ''}" data-a="bm-view" data-v="lift">This lift</button></div>` : ''}
+    <div class="bc-figs">
+      <figure>${bodySVG('front', st, key)}<figcaption>Front</figcaption></figure>
+      <figure>${bodySVG('back', st, key)}<figcaption>Back</figcaption></figure>
+    </div>
+    ${muscleChips(st)}
+  </div>`;
+}
+// The small picture on each lift: the side of the body its main muscles are on, zoomed to the upper or
+// lower body when that's all it works, lighting up set by set.
+function exMuscles(w, i) {
+  const e = w.exercises[i], st = muscleState([{ ...e, sets: e.sets.length ? e.sets : [{ done: false }] }]);
+  const ms = Object.keys(st);
+  if (!ms.length) return '';
+  const [main, help] = byRole(st), sideW = { front: 0, back: 0 };
+  main.forEach(m => { sideW[BODY_SIDE[m]] += 1; });
+  const side = sideW.back > sideW.front ? 'back' : 'front';
+  const y0 = Math.max(0, Math.min(...ms.map(m => MUSCLE_Y[m][0])) - 8), y1 = Math.min(214, Math.max(...ms.map(m => MUSCLE_Y[m][1])) + 8);
+  const h = y1 - y0, wd = Math.min(100, Math.max(60, h * 0.9)), vb = `${(50 - wd / 2).toFixed(1)} ${y0} ${wd.toFixed(1)} ${h}`;
+  return `<div class="ex-mus">${bodySVG(side, st, `x:${w.id}:${i}:${e.key}`, { vb, cls: 'bm-thumb', floor: 0.45 })}
+    <div class="ex-mus-t"><b>${main.map(m => MUSCLES[m]).join(', ')}</b>${help.length ? `<span>Helps: ${help.map(m => MUSCLES[m].toLowerCase()).join(', ')}</span>` : ''}</div></div>`;
+}
+// Fade each muscle from where it was to where it is now (a full redraw would otherwise jump).
+function lightMuscles() {
+  const els = document.querySelectorAll('.bm-m[data-o]');
+  if (!els.length) return;
+  void document.body.offsetWidth; // lay out the starting look first, so the change below animates
+  els.forEach(el => { el.style.fillOpacity = el.dataset.o; });
+}
 
 // ----- too sore today -----
 // Pick what's sore and today's lifts work around it: lifts aimed at it sit out (until you un-pick it),
@@ -1483,6 +1623,7 @@ function render() {
   if (S.view) html = ({ workout: viewWorkout, exercise: viewExercise, progDay: viewProgDay, compare: viewCompare })[S.view.name]();
   else html = ({ today: viewToday, history: viewHistory, body: viewBody, stats: viewStats, more: viewMore })[S.tab]();
   $('#view').innerHTML = html;
+  lightMuscles();
   celebrateDay();
 }
 
@@ -2241,6 +2382,7 @@ function sessionStrength(w) {
     ${w.exercises.length && !S.workouts.some(x => (x.exercises || []).some(e => doneSets(e).length)) ? '<div class="sh-hint tap-hint">Tap a set to change it, then ✓ when it\'s done. Saves as you go.</div>' : ''}
     ${w.date === todayStr() && !deloadState(w.date).active && !hasWork(w) ? deloadCard(w.date) : ''}
     ${!isLive(w) && w.exercises.some(e => e.sets.some(x => !x.done && x.w !== '' && x.r !== '')) ? `<button class="btn pri block" data-a="log-all" data-wid="${w.id}">${ic('check')} Log all sets as shown</button><div class="sh-hint" style="margin-bottom:10px">Or tick just the ones you did. Only ticked sets count.</div>` : ''}
+    ${bodyCard(w)}
     ${cards || '<div class="card empty"><b>No exercises yet</b>Add your first one below.</div>'}
     <div class="btn-row add-pair">
       <button class="btn" data-a="sx-add" data-wid="${w.id}">+ Exercise</button>
@@ -2292,6 +2434,7 @@ function exBlock(w, i, letter) {
         <button class="icon-btn" data-a="ex-opts" data-wid="${w.id}" data-ex="${i}" aria-label="Change or remove">${ic('more')}</button>
       </div>
     </div>
+    ${exMuscles(w, i)}
     <div class="ex-last">${lastTxt}</div>
     ${last && last.note && last.note.quote ? `<div class="ex-note">“${esc(last.note.quote)}”<span>Your note, ${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}</span></div>` : ''}
     ${banner}
@@ -4026,6 +4169,7 @@ const ACT = {
     toastUndo(`Removed ${a.type === 'other' ? a.name || 'activity' : (ACT_TYPES[a.type] || 'activity')}`, () => { w.activities.splice(+d.i, 0, a); persist(w); render(); });
   },
   'checkin-open': () => { S.checkinOpen = true; render(); },
+  'bm-view': d => { S.settings.bodyView = d.v; saveSettings(); render(); },
   'ex-unfold': d => { S.unfold = { ...(S.unfold || {}), [`${d.wid}:${d.ex}`]: true }; render(); },
   'past-open': d => { S.sheet = { kind: 'past', date: d.d || addDays(todayStr(), -1) }; renderSheet(); },
   'past-make': d => {
