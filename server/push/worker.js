@@ -1,6 +1,7 @@
 // Weigh-in reminder server for Lift Log. Deploy from this folder with: npx wrangler deploy
 // It keeps only each phone's push address, reminder times, time zone, and the last day it weighed in
-// or did anything (no workout data). Every 15 minutes it sends:
+// or did anything. If the nightly trainer is turned on in the app, it also keeps a copy of the log
+// (sync:<key>) and the trainer's latest changes (coach:<key>). Every 15 minutes it sends:
 //   - the weigh-in reminder, unless they've already weighed in that day
 //   - the streak saver, unless they've already done something that day
 //   - on the 1st of the month, the check-in day reminder (measurements, plus photos every 3 months)
@@ -9,6 +10,7 @@
 const ALLOWED_ORIGINS = ['https://adewyn.github.io', 'http://localhost:8790'];
 const PUSH_HOSTS = [/(^|\.)push\.apple\.com$/, /^fcm\.googleapis\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /\.notify\.windows\.com$/];
 const MAX_SUBS = 50;
+const MAX_SYNCS = 3;
 
 export default {
   async fetch(req, env, ctx) {
@@ -26,6 +28,29 @@ export default {
 
     let body;
     try { body = await req.json(); } catch { return reply({ error: 'bad request' }, 400); }
+
+    // Nightly trainer (opt-in in the app). The phone sends a copy of its log under a long secret key;
+    // the trainer reads it at midnight and leaves program changes under the same key for the app to pick up.
+    if (path === 'sync' || path === 'coach') {
+      const k = String(body.k || '');
+      if (!/^t_[a-z0-9]{24,40}$/.test(k)) return reply({ error: 'bad key' }, 400);
+      if (path === 'coach') return reply((await env.SUBS.get(`coach:${k}`, 'json')) || {});
+      if (body.off) {
+        await env.SUBS.delete(`sync:${k}`);
+        await env.SUBS.delete(`coach:${k}`);
+        return reply({ ok: true });
+      }
+      if (!body.data || typeof body.data !== 'object' || body.data.app !== 'liftlog') return reply({ error: 'bad data' }, 400);
+      const txt = JSON.stringify({ at: new Date().toISOString(), data: body.data });
+      if (txt.length > 8_000_000) return reply({ error: 'too big' }, 413);
+      if (!(await env.SUBS.get(`sync:${k}`))) {
+        const { keys } = await env.SUBS.list({ prefix: 'sync:' });
+        if (keys.length >= MAX_SYNCS) return reply({ error: 'server is full' }, 503);
+      }
+      await env.SUBS.put(`sync:${k}`, txt);
+      return reply({ ok: true });
+    }
+
     const id = String(body.id || '');
     if (!/^r_[a-z0-9]{6,30}$/.test(id)) return reply({ error: 'bad id' }, 400);
     const subs = await loadSubs(env);

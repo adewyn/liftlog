@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = {
   goal: 'maintain', creatine: true, deloadUntil: null, deloadLast: null, deloadSnooze: null,
   proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
   reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', measureOn: false, measureTime: '10:00', id: null },
+  trainer: { on: false, k: null, lastSync: 0, lastId: null },
 };
 // The weigh-in reminder server (server/push in this folder) and its public key.
 const PUSH_URL = 'https://liftlog-push.sporebound.workers.dev';
@@ -271,6 +272,8 @@ async function loadState() {
   S.settings = { ...DEFAULT_SETTINGS, ...(kv.settings || {}) };
   S.settings.reminder = { ...DEFAULT_SETTINGS.reminder, ...((kv.settings || {}).reminder || {}) };
   S.settings.profile = { ...DEFAULT_SETTINGS.profile, ...((kv.settings || {}).profile || {}) };
+  S.settings.trainer = { ...DEFAULT_SETTINGS.trainer, ...((kv.settings || {}).trainer || {}) };
+  S.coachLog = kv.coachLog || [];
   if (!S.settings.streakRuleFrom) { S.settings.streakRuleFrom = todayStr(); await saveSettings(); }
   S.foods = kv.foods || [];
   if (!kv.program || migrated) await saveProgram();
@@ -644,34 +647,61 @@ const planKeyFor = date => `${energyFor(date) || ''}|${sleepShort(date) ? 's' : 
 const MUSCLES = { chest: 'Chest', back: 'Back', shoulders: 'Shoulders', rear: 'Rear delts', biceps: 'Biceps', triceps: 'Triceps', quads: 'Quads', hams: 'Hamstrings', glutes: 'Glutes', calves: 'Calves', abs: 'Abs' };
 // 10 or more weekly sets builds more muscle (ACSM 2026); smaller areas do fine with about 6.
 const MUSCLE_GOAL = { rear: 6, calves: 6, abs: 6 };
+// Each rule: [names, muscles that count toward weekly sets, light helpers you'll feel but that don't
+// count]. Light helpers only show on the pictures and in "Helps".
 const MUSCLE_RULES = [
   [/wrist curl/i, {}],
-  [/face pull|rear delt|reverse fly|cuban|external rot|pull-?apart/i, { rear: 1 }],
+  [/side.?(lying )?leg raise|lateral leg raise|clamshell|fire hydrant/i, { glutes: 0.5 }, ['abs']],
+  [/cuban|external rot/i, { rear: 1 }, ['shoulders', 'back']],
+  [/face pull|rear delt|reverse fly|pull-?apart/i, { rear: 1 }, ['back']],
+  [/front raise/i, { shoulders: 1 }, ['chest']],
+  [/mace (360|churn|rotation|twirl|whirl|swing|overhead)/i, { shoulders: 1, back: 0.5, abs: 0.5 }, ['triceps']],
+  [/(chair|bench) dips?/i, { triceps: 1, shoulders: 0.5 }, ['chest']],
+  [/glute (lift|drive|machine)/i, { glutes: 1, hams: 0.5 }, ['quads']],
+  [/single.?leg (kettlebell |kb |db |dumbbell )?(deadlift|rdl)|single.?leg romanian/i, { hams: 1, glutes: 0.5, back: 0.5 }, ['abs', 'calves']],
   [/back extension|hyperextension/i, { hams: 0.5, glutes: 0.5, back: 0.5 }],
-  [/triceps|pushdown|push-down|skull|french press/i, { triceps: 1 }],
-  [/pullover/i, { back: 1 }],
-  [/lateral raise|side raise|upright row/i, { shoulders: 1 }],
-  [/overhead press|shoulder press|military|arnold|standing (bar |barbell )?press|\bohp\b/i, { shoulders: 1, triceps: 0.5 }],
-  [/pallof|crunch|leg raise|plank|\babs\b|sit-?up|ab wheel|woodchop/i, { abs: 1 }],
+  [/overhead (triceps|tricep|cable) extension|french press/i, { triceps: 1 }, ['shoulders']],
+  [/triceps|pushdown|push-down|skull/i, { triceps: 1 }],
+  [/pullover/i, { back: 1 }, ['chest', 'triceps']],
+  [/lateral raise|side raise|square raise|upright row/i, { shoulders: 1 }, ['back']],
+  [/overhead press|shoulder press|military|arnold press|standing (bar |barbell )?press|\bohp\b/i, { shoulders: 1, triceps: 0.5 }, ['chest', 'back']],
+  [/pallof|woodchop/i, { abs: 1 }, ['glutes', 'shoulders']],
+  [/hanging (knee|leg) raise|leg raise|ab wheel|rollout|flutter kick|mountain climber|v-?up|hollow/i, { abs: 1 }, ['back']],
+  [/russian twist|dead ?bug|bird ?dog/i, { abs: 1 }],
+  [/crunch|plank|\babs\b|sit-?up/i, { abs: 1 }],
   [/calf/i, { calves: 1 }],
-  [/hamstring|leg curl|nordic/i, { hams: 1 }],
-  [/romanian|\brdl\b|good morning|stiff.?leg/i, { hams: 1, glutes: 0.5, back: 0.5 }],
-  [/(hex|trap).?bar deadlift/i, { quads: 0.5, hams: 0.5, glutes: 0.5, back: 0.5 }],
-  [/deadlift/i, { hams: 0.5, glutes: 0.5, back: 0.5 }],
-  [/sled/i, { quads: 0.5, glutes: 0.5 }],
-  [/hip thrust|glute bridge|glute kickback/i, { glutes: 1, hams: 0.5 }],
+  [/hamstring|leg curl|nordic/i, { hams: 1 }, ['calves']],
+  [/romanian|\brdl\b|good morning|stiff.?leg/i, { hams: 1, glutes: 0.5, back: 0.5 }, ['abs']],
+  [/(hex|trap).?bar deadlift/i, { quads: 0.5, hams: 0.5, glutes: 0.5, back: 0.5 }, ['abs']],
+  [/deadlift/i, { hams: 0.5, glutes: 0.5, back: 0.5 }, ['quads', 'abs']],
+  [/sled/i, { quads: 0.5, glutes: 0.5 }, ['hams', 'calves']],
+  [/hip thrust|glute bridge/i, { glutes: 1, hams: 0.5 }, ['quads', 'abs']],
+  [/glute kickback/i, { glutes: 1 }, ['hams']],
   [/abduct/i, { glutes: 0.5 }],
+  [/adduct/i, {}, ['glutes', 'quads']],
   [/leg extension/i, { quads: 1 }],
-  [/squat|leg press|lunge|step-?up/i, { quads: 1, glutes: 0.5 }],
-  [/row/i, { back: 1, biceps: 0.5, rear: 0.5 }],
-  [/pull-?up|chin-?up|pulldown|pullover/i, { back: 1, biceps: 0.5 }],
-  [/curl/i, { biceps: 1 }],
-  [/pushdown|push-down|triceps|skull|kickback|french press|close-grip/i, { triceps: 1 }],
-  [/fly|flye|crossover|pec deck/i, { chest: 1 }],
-  [/bench|chest press|\bdips?\b|push-?up|incline|decline|floor press|free press|machine press|d(umb)?b(ell)? press|dumbbell chest/i, { chest: 1, triceps: 0.5, shoulders: 0.5 }],
-  [/farmer|suitcase carry|\bcarry\b/i, { back: 0.5, abs: 0.5 }],
+  [/split squat|lunge|step-?up/i, { quads: 1, glutes: 0.5 }, ['hams', 'abs', 'calves']],
+  [/leg press|pendulum|hack squat|belt squat|machine squat/i, { quads: 1, glutes: 0.5 }, ['hams', 'calves']],
+  [/squat/i, { quads: 1, glutes: 0.5 }, ['hams', 'abs', 'back']],
+  [/row/i, { back: 1, biceps: 0.5, rear: 0.5 }, ['abs']],
+  [/pull-?up|chin-?up/i, { back: 1, biceps: 0.5 }, ['rear', 'abs', 'triceps']],
+  [/pulldown/i, { back: 1, biceps: 0.5 }, ['rear', 'triceps']],
+  [/hammer curl|reverse curl/i, { biceps: 1 }],
+  [/curl/i, { biceps: 1 }, ['shoulders']],
+  [/kickback|close-grip/i, { triceps: 1 }, ['chest']],
+  [/fly|flye|crossover|pec deck/i, { chest: 1 }, ['shoulders', 'biceps']],
+  [/push-?up/i, { chest: 1, triceps: 0.5, shoulders: 0.5 }, ['abs']],
+  [/\bdips?\b/i, { chest: 1, triceps: 0.5, shoulders: 0.5 }, ['back']],
+  [/bench|chest press|incline|decline|floor press|free press|machine press|d(umb)?b(ell)? press|dumbbell chest/i, { chest: 1, triceps: 0.5, shoulders: 0.5 }],
+  [/farmer|suitcase carry|\bcarry\b/i, { back: 0.5, abs: 0.5 }, ['glutes', 'calves']],
 ];
 const musclesOf = name => { const n = normName(name); return (MUSCLE_RULES.find(([re]) => re.test(n)) || [null, {}])[1]; };
+// For the pictures: the counted muscles plus light helpers (a quarter, so they show as helping).
+const musclesShown = name => {
+  const n = normName(name), r = MUSCLE_RULES.find(([re]) => re.test(n)) || [null, {}, []], out = { ...r[1] };
+  (r[2] || []).forEach(m => { if (!out[m]) out[m] = 0.25; });
+  return out;
+};
 
 // ---------- muscle map ----------
 // A front and back body drawn on a 100 × 214 grid. Each side is drawn once (x under 50) and mirrored,
@@ -743,18 +773,23 @@ function bodySVG(side, state, key, opts = {}) {
 // The muscles a set of lifts works: main where any lift hits it directly, helping otherwise.
 // p is the share of that muscle's sets checked off (helping sets count half).
 function muscleState(exs) {
-  const plan = {}, done = {}, role = {};
+  const plan = {}, done = {}, role = {}, mPlan = {}, mDone = {};
   exs.forEach(e => {
-    const ms = Object.entries(musclesOf(e.name)), top = Math.max(0, ...ms.map(([, f]) => f));
+    const ms = Object.entries(musclesShown(e.name)), top = Math.max(0, ...ms.map(([, f]) => f));
+    const n = e.sets.length, d = e.sets.filter(s => s.done).length;
     ms.forEach(([m, f]) => {
-      plan[m] = (plan[m] || 0) + f * e.sets.length;
-      done[m] = (done[m] || 0) + f * e.sets.filter(s => s.done).length;
+      plan[m] = (plan[m] || 0) + f * n;
+      done[m] = (done[m] || 0) + f * d;
       // A lift with no direct muscle (like a carry) still counts its biggest one as main.
-      if (f >= 1 || f === top) role[m] = 'main'; else if (!role[m]) role[m] = 'help';
+      if (f >= 1 || f === top) { role[m] = 'main'; mPlan[m] = (mPlan[m] || 0) + n; mDone[m] = (mDone[m] || 0) + d; } else if (!role[m]) role[m] = 'help';
     });
   });
+  // A main muscle fills from the lifts that train it; lifts that only help don't hold it back.
   const st = {};
-  Object.keys(plan).forEach(m => { if (plan[m] > 0) st[m] = { role: role[m], p: Math.min(1, done[m] / plan[m]) }; });
+  Object.keys(plan).forEach(m => {
+    if (!(plan[m] > 0)) return;
+    st[m] = role[m] === 'main' ? { role: 'main', p: Math.min(1, mDone[m] / mPlan[m]) } : { role: 'help', p: Math.min(1, done[m] / plan[m]) };
+  });
   return st;
 }
 const byRole = st => ['main', 'help'].map(r => Object.keys(MUSCLES).filter(m => st[m] && st[m].role === r));
@@ -769,7 +804,7 @@ const currentLift = w => { const i = w.exercises.findIndex(e => e.sets.some(s =>
 // The day's body map: every muscle today's lifts work, lighting up as sets get checked off.
 // While you're lifting, switch to just the lift you're on.
 function bodyCard(w) {
-  if (!w.exercises.some(e => Object.keys(musclesOf(e.name)).length)) return '';
+  if (!w.exercises.some(e => Object.keys(musclesShown(e.name)).length)) return '';
   const live = isLive(w) && w.exercises.some(e => e.sets.some(s => !s.done));
   const mode = live && S.settings.bodyView === 'lift' ? 'lift' : 'day';
   const ce = w.exercises[currentLift(w)];
@@ -2313,6 +2348,7 @@ function viewToday() {
       ${alsoToday(w)}
     </header>
     ${welcomeCard()}
+    ${trainerCard()}
     ${todaySummary(date, w)}
     ${noteBanner(date)}
     ${comebackCard(w)}
@@ -3275,6 +3311,7 @@ function viewMore() {
 
     ${proteinCard()}
     ${reminderCard()}
+    ${trainerSettingsCard()}
 
     <h2>Backup</h2>
     <div class="card">
@@ -3729,6 +3766,183 @@ function reminderTimeChanged(field, value) {
   r[field] = value;
   saveSettings();
   if (remAny(r)) reminderSync().then(() => toast(`Moved to ${fmtTime(value)}`)).catch(err => toast(`Couldn't update: ${err.message}`));
+}
+
+// ---------- nightly trainer ----------
+// Opt-in. The app copies the log (no photos, no food items) to the Lift Log server under a long secret
+// key. At midnight a trainer reads it and may leave program changes, which the app applies to upcoming
+// workouts only. Logged workouts never change.
+function trainerSnapshot() {
+  const { reminder, ...settings } = S.settings;
+  return {
+    app: 'liftlog', version: 1, appVersion: APP_VERSION, exportedAt: new Date().toISOString(),
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    program: S.program, settings, workouts: S.workouts,
+    body: Object.values(S.body).map(({ items, ...b }) => b),
+    coachLog: S.coachLog.slice(0, 10).map(c => ({ id: c.id, date: c.date, undone: !!c.undone })),
+  };
+}
+let trainerBusy = false, trainerLastPull = 0;
+async function trainerSync(force) {
+  const t = S.settings.trainer;
+  if (!t.on || !t.k || trainerBusy || !navigator.onLine) return;
+  const data = trainerSnapshot();
+  const sig = JSON.stringify({ ...data, exportedAt: 0 });
+  if (!force && sig === S.trainerSig) return;
+  trainerBusy = true;
+  try {
+    await pushApi('sync', { k: t.k, data });
+    S.trainerSig = sig;
+    t.lastSync = Date.now();
+    saveSettings();
+  } catch (err) { /* try again next time */ } finally { trainerBusy = false; }
+}
+async function trainerPull() {
+  const t = S.settings.trainer;
+  if (!t.on || !t.k || !navigator.onLine) return;
+  trainerLastPull = Date.now();
+  try {
+    const plan = await pushApi('coach', { k: t.k });
+    if (plan && plan.id && plan.id !== t.lastId) applyCoachPlan(plan);
+  } catch (err) { /* offline */ }
+}
+
+const COACH_NUM = (v, lo, hi) => (v == null || v === '' ? undefined : Number.isFinite(+v) && +v >= lo && +v <= hi ? Math.round(+v) : NaN);
+function coachFind(day, name) {
+  const k = keyOf(name || '');
+  for (let gi = 0; gi < (day.groups || []).length; gi++) {
+    const ii = day.groups[gi].findIndex(x => keyOf(x.name) === k);
+    if (ii >= 0) return { gi, ii, x: day.groups[gi][ii] };
+  }
+  return null;
+}
+const rangeTxt = x => (x.min == null ? (x.note || 'max reps') : `${x.min === x.max ? x.min : `${x.min}–${x.max}`}${x.unit === 'steps' ? ' steps' : ''}`);
+const presTxt = x => `${x.sets} × ${rangeTxt(x)}`;
+// One change from the trainer. Returns a line to show, or null when it doesn't fit the program.
+function coachOp(prog, c) {
+  if (!c || !isDayKey(c.day)) return null;
+  const day = prog.days[c.day], D = DAY_NAMES[c.day];
+  if (c.op === 'label') {
+    const label = String(c.label || '').trim().slice(0, 40);
+    if (!label || day.type !== 'strength') return null;
+    day.label = label;
+    return `${D} is now "${label}"`;
+  }
+  if (day.type !== 'strength' || !Array.isArray(day.groups)) return null;
+  const sets = COACH_NUM(c.sets, 1, 5), min = COACH_NUM(c.min, 1, 60), max = COACH_NUM(c.max, 1, 60);
+  if ([sets, min, max].some(Number.isNaN) || (min != null && max != null && max < min)) return null;
+  const note = c.note != null ? String(c.note).trim().slice(0, 60) : undefined;
+  const shape = x => {
+    if (sets != null) x.sets = sets;
+    if (min != null) x.min = min;
+    if (max != null) x.max = max;
+    if (min != null && max == null && x.max < min) x.max = min;
+    if (note !== undefined) x.note = note;
+  };
+  const name = String(c.name || '').trim().slice(0, 50);
+  if (c.op === 'add') {
+    if (!name || coachFind(day, name) || sets == null) return null;
+    const x = ex(name, sets, min ?? null, max ?? min ?? null, UP, { note: note || '', ...(c.body === 'lower' || c.body === 'upper' ? { body: c.body } : {}) });
+    const w = c.with && coachFind(day, c.with), a = c.after && coachFind(day, c.after);
+    if (w) day.groups[w.gi].push(x);
+    else day.groups.splice(a ? a.gi + 1 : day.groups.length, 0, [x]);
+    return `${D}: added ${name}, ${presTxt(x)}${w ? ` (paired with ${w.x.name})` : ''}`;
+  }
+  const f = coachFind(day, name);
+  if (!f) return null;
+  if (c.op === 'remove') {
+    day.groups[f.gi].splice(f.ii, 1);
+    if (!day.groups[f.gi].length) day.groups.splice(f.gi, 1);
+    return `${D}: dropped ${f.x.name}`;
+  }
+  if (c.op === 'swap') {
+    const to = String(c.to || '').trim().slice(0, 50);
+    if (!to || coachFind(day, to)) return null;
+    const old = f.x.name, x = { ...f.x, id: uid('e'), name: to, unit: 'reps', stepSet: false, inc: UP };
+    delete x.kind; delete x.body;
+    if (c.body === 'lower' || c.body === 'upper') x.body = c.body;
+    if (note === undefined) x.note = '';
+    shape(x); classify(x);
+    day.groups[f.gi][f.ii] = x;
+    return `${D}: ${old} → ${to}, ${presTxt(x)}`;
+  }
+  if (c.op === 'set') {
+    const before = presTxt(f.x);
+    shape(f.x);
+    const after = presTxt(f.x);
+    return before === after && note === undefined ? null : `${D}: ${f.x.name} ${before} → ${after}`;
+  }
+  return null;
+}
+function applyCoachPlan(plan) {
+  const t = S.settings.trainer;
+  t.lastId = String(plan.id).slice(0, 60);
+  saveSettings();
+  const note = String(plan.note || '').trim().slice(0, 1500);
+  const prog = JSON.parse(JSON.stringify(S.program));
+  const lines = (Array.isArray(plan.changes) ? plan.changes.slice(0, 12) : []).map(c => {
+    const t2 = coachOp(prog, c);
+    return t2 && { t: t2, why: String((c && c.why) || '').trim().slice(0, 200) };
+  }).filter(Boolean);
+  if (!note && !lines.length) return;
+  const entry = { id: t.lastId, date: todayStr(), note, lines, seen: false, undone: false };
+  if (lines.length) {
+    DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program } }).catch(() => {});
+    S.program = prog;
+    saveProgram();
+  }
+  S.coachLog = [entry, ...S.coachLog.filter(c => c.id !== entry.id)].slice(0, 30);
+  saveCoachLog();
+  if (!S.sheet && !typing()) render();
+}
+const saveCoachLog = () => DB.put('kv', { k: 'coachLog', v: S.coachLog }).catch(saveFailed);
+
+function coachLines(c) {
+  return c.lines.length ? `<div class="tr-lines">${c.lines.map(l => `<div class="tr-line">${esc(l.t)}${l.why ? `<small>${esc(l.why)}</small>` : ''}</div>`).join('')}</div>` : '';
+}
+function trainerCard() {
+  const c = S.coachLog.find(x => !x.seen);
+  if (!c) return '';
+  return `<div class="card tr-card">
+    <div class="lbl">From your trainer · ${esc(fmtDate(c.date, { weekday: 'short', month: 'short', day: 'numeric' }))}</div>
+    ${c.note ? `<div class="tr-note">${esc(c.note).replace(/\n+/g, '<br>')}</div>` : ''}
+    ${coachLines(c)}
+    ${c.lines.length ? '<div class="sh-hint">Changes start with your next workout. What you already logged stays the same.</div>' : ''}
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn pri" data-a="coach-ok" data-k="${esc(c.id)}">Got it</button>
+      ${c.lines.length && !c.undone ? `<button class="btn" data-a="coach-undo" data-k="${esc(c.id)}">Undo</button>` : ''}
+    </div></div>`;
+}
+function trainerSettingsCard() {
+  const t = S.settings.trainer;
+  const ago = t.lastSync ? new Date(t.lastSync).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : 'not yet';
+  const past = S.coachLog.slice(0, 8);
+  return `<h2>Nightly trainer</h2>
+    <div class="card">
+      <div class="rem-row">
+        <div><b>Midnight check-in</b><small>Each night a trainer looks at your lifts, weigh-ins, measurements, check-ins, and notes, then adjusts your upcoming workouts for a strong, balanced, athletic build. Notes show up on Today.</small></div>
+        <button class="toggle ${t.on ? 'on' : ''}" data-a="trainer-toggle" aria-pressed="${!!t.on}">${t.on ? 'On' : 'Off'}</button>
+      </div>
+      ${t.on ? `<div class="sh-hint">Last sent: ${esc(ago)}. Sends on its own while you use the app (not photos or food). Turning it off deletes the copy.</div>
+        <button class="btn block" style="margin-top:10px" data-a="trainer-now">Send now</button>` : ''}
+      ${past.length ? `<button class="linkbtn" style="margin-top:12px" data-a="coach-notes">${S.coachNotesOpen ? 'Hide past notes' : `Past notes (${past.length})`}</button>
+        ${S.coachNotesOpen ? past.map(c => `<div class="tr-past"><div class="lbl">${esc(fmtDate(c.date, { weekday: 'short', month: 'short', day: 'numeric' }))}${c.undone ? ' · undone' : ''}</div>${c.note ? `<div class="tr-note">${esc(c.note).replace(/\n+/g, '<br>')}</div>` : ''}${coachLines(c)}</div>`).join('') : ''}` : ''}
+    </div>`;
+}
+async function trainerToggle() {
+  const t = S.settings.trainer;
+  if (!t.on) {
+    if (!confirm('Turn on the nightly trainer?\n\nA copy of your log (workouts, weigh-ins, measurements, check-ins, and notes; not photos or food) goes to your private Lift Log server while you use the app. At midnight your trainer reads it and may change your upcoming workouts. Turn it off anytime to delete the copy.')) return;
+    t.k = t.k || `t_${Array.from(crypto.getRandomValues(new Uint8Array(28)), b => (b % 36).toString(36)).join('')}`;
+    t.on = true; t.lastSync = 0;
+    saveSettings(); render();
+    await trainerSync(true);
+    toast(t.lastSync ? 'Nightly trainer on. First check-in tonight at midnight.' : "Nightly trainer on, but couldn't send yet. It'll try again.", 5000);
+    return;
+  }
+  t.on = false;
+  saveSettings(); render();
+  try { await pushApi('sync', { k: t.k, off: true }); toast('Nightly trainer off. Your copy on the server is deleted.'); } catch (err) { toast("Trainer off. Couldn't reach the server to delete the copy; turn it on and off again later."); }
 }
 
 // ---------- backup ----------
@@ -4391,6 +4605,18 @@ const ACT = {
   'set-prot': d => { S.settings.proteinTarget = Math.max(5, S.settings.proteinTarget + +d.d); saveSettings(); render(); },
   'set-sound': () => { S.settings.sound = !S.settings.sound; saveSettings(); render(); if (S.settings.sound) beep(); },
   export: () => exportData(),
+  'trainer-toggle': () => trainerToggle(),
+  'trainer-now': async () => { await trainerSync(true); await trainerPull(); render(); toast(Date.now() - S.settings.trainer.lastSync < 5000 ? 'Sent.' : "Couldn't send. Check your connection."); },
+  'coach-notes': () => { S.coachNotesOpen = !S.coachNotesOpen; render(); },
+  'coach-ok': d => { const c = S.coachLog.find(x => x.id === d.k); if (c) { c.seen = true; saveCoachLog(); } render(); },
+  'coach-undo': async d => {
+    const c = S.coachLog.find(x => x.id === d.k);
+    const u = (await DB.all('kv')).find(r => r.k === 'coachUndo');
+    if (!c || !u || !u.v || u.v.id !== c.id) { toast("Can't undo that one anymore. Change anything in More → Program."); return; }
+    S.program = u.v.program; await saveProgram();
+    c.undone = true; c.seen = true; saveCoachLog();
+    render(); toast('Put your program back the way it was.');
+  },
   import: () => $('#import-file').click(),
 };
 
@@ -4502,7 +4728,9 @@ document.addEventListener('visibilitychange', () => {
     if (typing()) document.activeElement.blur();
     flushSaves();
     if (progTimer) { clearTimeout(progTimer); progTimer = null; saveProgram(); }
+    trainerSync();
   } else if (S.program) {
+    if (Date.now() - trainerLastPull > 30 * 60000) trainerPull().then(() => trainerSync());
     if (T.iv) drawTimer();
     // A new day since you last looked: start from today everywhere.
     if (shownDay !== todayStr()) {
@@ -4518,6 +4746,9 @@ document.addEventListener('visibilitychange', () => {
     if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {});
   }
 });
+
+// While the app is open, send the log a couple of minutes after anything changes.
+setInterval(() => { if (S.program && document.visibilityState === 'visible' && !typing()) trainerSync(); }, 120000);
 
 let liveLast = '';
 setInterval(() => {
@@ -4549,6 +4780,7 @@ setInterval(() => {
     });
   }
   if (remAny(S.settings.reminder) && navigator.onLine) reminderSync().catch(() => {});
+  trainerPull().then(() => trainerSync());
   if (navigator.storage && navigator.storage.persist) {
     try { S.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } catch (e) { /* ignore */ }
   }

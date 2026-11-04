@@ -825,3 +825,12 @@ body.has-timer .streak-pill { visibility: hidden; }
 .ex-mus-t { display: flex; flex-direction: column; gap: 1px; font-size: 13px; line-height: 1.3; }
 .ex-mus-t b { font-weight: 650; color: var(--tx); }
 .ex-mus-t span { color: var(--mut); font-size: 12.5px; }
+
+/* nightly trainer */
+.tr-card { border-color: rgba(116, 198, 255, .28); background: linear-gradient(180deg, rgba(116, 198, 255, .09), rgba(116, 198, 255, .03)); }
+.tr-card .lbl { color: #74c6ff; }
+.tr-note { font-size: 15px; line-height: 1.45; margin-top: 6px; }
+.tr-lines { margin-top: 10px; display: grid; gap: 8px; }
+.tr-line { font-size: 14px; font-weight: 600; padding-left: 12px; border-left: 2px solid var(--acc); }
+.tr-line small { display: block; font-weight: 400; color: var(--dim); margin-top: 2px; }
+.tr-past { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
