@@ -282,9 +282,7 @@ textarea.inp { min-height: 104px; padding: 12px 14px; resize: vertical; line-hei
 .prog { height: 12px; background: var(--s2); border-radius: 99px; overflow: hidden; margin: 10px 0 14px; }
 .prog > div { height: 100%; background: var(--acc); border-radius: 99px; transition: width .3s; }
 .prog.hit > div { background: var(--good); }
-.quick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.quick button { min-height: 54px; border-radius: 14px; background: var(--s2); font-weight: 700; font-size: 18px; }
-.quick button:active, .st-btn:active, .btn:active, .check:active, .set-val:active { transform: scale(.97); }
+.st-btn:active, .btn:active, .check:active, .set-val:active { transform: scale(.97); }
 .food-form { display: grid; grid-template-columns: 1fr 84px; gap: 8px; }
 .food { display: grid; grid-template-columns: 1fr 54px; gap: 6px; margin-top: 8px; }
 .food-add {
@@ -574,7 +572,7 @@ h2::before { content: ""; width: 6px; height: 6px; border-radius: 2px; backgroun
 .card { border-radius: 20px; }
 .tip { background: linear-gradient(180deg, rgba(198, 242, 78, .1), rgba(198, 242, 78, .04)); border-color: rgba(198, 242, 78, .22); }
 
-.btn, .chip, .seg button, .toggle, .tm-btn, .st-btn, .quick button, .ex-tools button, .icon-btn, .day-strip button, .food-add {
+.btn, .chip, .seg button, .toggle, .tm-btn, .st-btn, .ex-tools button, .icon-btn, .day-strip button, .food-add {
   transition: transform .12s ease, background-color .2s ease, color .2s ease, box-shadow .2s ease;
 }
 .btn:active, .chip:active, .seg button:active, .toggle:active, .tm-btn:active, .ex-tools button:active, .day-strip button:active, .food-add:active, .icon-btn:active { transform: scale(.97); }

@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.1.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1962,7 +1962,7 @@ function viewBody() {
       <button class="food-star ${f.fav ? 'on' : ''}" data-a="food-fav" data-n="${esc(f.name)}" aria-label="${f.fav ? 'Remove from favorites' : 'Add to favorites'}">${f.fav ? '★' : '☆'}</button>
     </div>`;
   const eaten = b.items.map((x, k) => `<div class="row">
-      <div><b>${esc(x.name || 'Quick add')}</b></div><span class="val">${x.g} g</span>
+      <div><b>${esc(x.name || 'Protein')}</b></div><span class="val">${x.g} g</span>
       <button class="icon-btn" data-a="item-rm" data-i="${k}" aria-label="Remove">${ic('x')}</button></div>`).join('');
 
   const weights = Object.values(S.body).filter(x => x.weight != null).sort((a, c) => a.date.localeCompare(c.date)).slice(-120);
@@ -2003,8 +2003,6 @@ function viewBody() {
       <button class="btn pri block" style="margin-top:8px" data-a="food-form">Add protein</button>
       ${favs.length ? `<label class="lbl">Favorites</label>${favs.map(foodBtn).join('')}` : ''}
       ${recent.length ? `<label class="lbl">Recent</label>${recent.map(foodBtn).join('')}<div class="sh-hint">Tap ☆ to keep one as a favorite.</div>` : ''}
-      <label class="lbl">Quick add</label>
-      <div class="quick">${[10, 20, 25, 30, 40, 50].map(n => `<button data-a="p-add" data-n="${n}">+${n}</button>`).join('')}</div>
     </div>
 
     ${S.settings.creatine ? `<div class="card"><div class="rem-row">
@@ -3348,7 +3346,6 @@ const ACT = {
     if (n > todayStr()) return;
     S.bodyDate = n; render();
   },
-  'p-add': d => addFood('', +d.n),
   'food-form': () => {
     const name = $('#food-name').value.trim(), g = num($('#food-g').value);
     if (!g || g <= 0) { toast('Enter the grams of protein'); $('#food-g').focus(); return; }
