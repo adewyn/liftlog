@@ -688,3 +688,44 @@ h2::before { content: ""; width: 6px; height: 6px; border-radius: 2px; backgroun
 .chips.days .chip .dot { top: 6px; right: 50%; margin-right: -3px; width: 6px; height: 6px; box-shadow: none; display: none; }
 .chips.days .chip .dot { display: block; position: absolute; top: auto; bottom: 5px; }
 .chips.days .chip.on .dot { background: var(--acc-ink); opacity: .55; }
+
+/* ---------- pocket coach ---------- */
+/* One line at the top of Today: what matters right now. */
+.daycoach { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 2px 2px 12px; border-bottom: 1px solid var(--line); }
+.dc-txt { flex: 1; min-width: 0; position: relative; padding-left: 16px; color: var(--tx); font-size: 15px; line-height: 1.4; text-align: left; }
+.dc-txt::before { content: ''; position: absolute; left: 2px; top: .5em; width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 4px rgba(198, 242, 78, .12); }
+.daycoach.good .dc-txt::before { background: var(--good); box-shadow: 0 0 0 4px rgba(94, 224, 138, .14); }
+.daycoach.care .dc-txt::before { background: var(--up); box-shadow: 0 0 0 4px rgba(255, 182, 72, .14); }
+.dc-txt i, .pc-txt i, .say i { font-style: normal; color: var(--dim); font-size: 13px; white-space: nowrap; }
+.dc-btn, .pc-add { flex: none; min-height: 44px; padding: 0 12px; border-radius: 12px; background: var(--s2); box-shadow: 0 0 0 1px var(--line) inset; color: var(--acc); font-size: 14px; font-weight: 700; white-space: nowrap; max-width: 52%; overflow: hidden; text-overflow: ellipsis; }
+.dc-btn:active, .pc-add:active, .say:active { transform: scale(.97); }
+.day-strip .behind b { color: var(--up); }
+
+/* Protein pace on the Body tab. */
+.pcoach { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: -2px; }
+.pc-txt { flex: 1 1 200px; min-width: 0; color: var(--mut); font-size: 14px; line-height: 1.4; text-align: left; }
+.pcoach.good .pc-txt { color: var(--good); }
+.pcoach.care .pc-txt { color: var(--tx); }
+
+/* The coach's word under a lift, right after a set. */
+.say { display: flex; align-items: flex-start; gap: 8px; width: 100%; margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--s2); color: var(--tx); font-size: 15px; line-height: 1.4; text-align: left; }
+.say > span:nth-child(2) { flex: 1; }
+.say-mark { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%; font-size: 11px; font-weight: 800; background: var(--s3); color: var(--mut); }
+.say-good { background: rgba(94, 224, 138, .09); color: #c9f5d8; }
+.say-good .say-mark { background: var(--good); color: var(--good-ink); }
+.say-care { background: rgba(255, 182, 72, .1); color: #ffe2b8; }
+.say-care .say-mark { background: var(--up); color: #2a1a00; }
+.say-up { background: rgba(255, 182, 72, .1); color: var(--up); }
+.say-up .say-mark { background: var(--up); color: #2a1a00; }
+.say-down { background: rgba(124, 196, 255, .1); color: #bfe2ff; }
+.say-down .say-mark { background: #9fd3ff; color: #08243a; }
+.say.fresh { animation: say-in .38s cubic-bezier(.2, .9, .3, 1.2); }
+@keyframes say-in { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+.fold-say { display: flex; align-items: center; gap: 6px; max-width: 100%; color: var(--mut); font-size: 13px; }
+.fold-say > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fold-say .say-mark { width: 16px; height: 16px; font-size: 9px; margin: 0; }
+.fold-say.say-good { color: #a9e6bf; background: none; }
+.fold-say.say-care, .fold-say.say-up { color: #f0c98d; background: none; }
+.fold-say.say-down { color: #9fd3ff; background: none; }
+@media (prefers-reduced-motion: reduce) { .say.fresh { animation: none; } }
+.pcoach .pc-add { max-width: 100%; }

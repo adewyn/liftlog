@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -229,6 +229,8 @@ const S = {
   bodyDate: todayStr(),
   sheet: null,
   persisted: null,
+  say: {},          // the coach's latest word on each lift today: { 'wid:i': { t, tone, why, at } }
+  said: {},         // what's been said per workout, so nothing repeats: { wid: { once, quiet } }
 };
 
 async function loadState() {
@@ -253,12 +255,19 @@ async function loadState() {
   (await DB.all('body')).forEach(b => { S.body[b.date] = b; });
   S.photos = await DB.all('photos').catch(() => []);
   S.draft = null;
+  freezeTargets();
   // Today's workout may already be saved with the hack squat in it: swap any not started yet.
   S.workouts.filter(w => w.date === todayStr()).forEach(w => (w.exercises || []).forEach(e => {
     if (/^hack squat$/i.test(e.name) && !e.sets.some(x => x.done)) { e.name = 'Leg press'; e.key = keyOf(e.name); fillSets(e, w); persist(w); }
   }));
 }
 
+// Days before today keep the protein target they ended with.
+function freezeTargets() {
+  const t = todayStr(), up = Object.values(S.body).filter(b => b.date < t && !b.target && (b.protein || (b.items || []).length));
+  up.forEach(b => { b.target = liveTarget(b.date); });
+  if (up.length) DB.putMany('body', up).catch(() => {});
+}
 const saveFailed = err => toast(`Couldn't save: ${err.message}`, 6000);
 const saveProgram = () => { S.draft = null; return DB.put('kv', { k: 'program', v: S.program }).catch(saveFailed); };
 const saveSettings = () => DB.put('kv', { k: 'settings', v: S.settings }).catch(saveFailed);
@@ -353,13 +362,13 @@ function coachPlan(t, recent, opts = {}) {
     const total = sum(reps);
     if (unit === 'reps' && last.sets.length >= t.sets && total >= 9 * t.sets && opts.energy !== 'low') {
       const w = round2(top + jumpFor(t, top));
-      return plan('up', fill(w), fill(6), `${total} reps in total last time. Add ${w - top} lb (a belt, a dumbbell between your feet, or a harder version) and build back up.`);
+      return plan('up', fill(w), fill(6), `${total} reps last time. Add ${w - top} lb (a belt, a dumbbell, or a harder version) and build back up.`);
     }
-    const tip = unit === 'reps' && !top && reps.length && Math.max(...reps) < 5 ? ' Under 5 a set? Use a band or slow lowering reps to get more practice in.' : '';
-    return plan('beat', prev, reps, `Beat last time: ${total} ${unit} in total. Go for one more.${tip}`);
+    const tip = unit === 'reps' && !top && reps.length && Math.max(...reps) < 5 ? ' Under 5 a set? A band or slow lowering reps help.' : '';
+    return plan('beat', prev, reps, `Beat ${total} ${unit} total. Just one more.${tip}`);
   }
   const lo = t.min ?? t.max, hi = t.max ?? t.min;
-  const holdWhy = opts.energy === 'low' ? (opts.sick ? 'you noted being sick' : "energy's low") : opts.tired || (opts.noted === 'lift-pain' ? 'you noted pain last time' : opts.noted === 'lift-hard' ? 'you wrote it felt hard last time' : '');
+  const holdWhy = opts.energy === 'low' ? (opts.sick ? "you're sick" : "energy's low") : opts.tired || (opts.noted === 'lift-pain' ? 'it hurt last time' : opts.noted === 'lift-hard' ? 'it felt hard last time' : '');
   // Sessions logged on a low-energy day don't count as misses.
   const short = p => !p.easy && (p.sets.length < t.sets || p.sets.some(x => +x.r < lo));
 
@@ -374,22 +383,22 @@ function coachPlan(t, recent, opts = {}) {
       }
     }
     const ups = ws.filter((w, k) => w > prev[k]).length;
-    if (ups) return plan('up', ws, rr, `Each set moves on its own: ${ups === 1 ? 'one set' : `${ups} sets`} hit ${hi}, so ${ups === 1 ? 'it goes' : 'they go'} up a step. The rest aim for one more rep.`);
-    if (earned) return plan('hold', ws, rr, `You earned a jump on ${earned === 1 ? 'a set' : `${earned} sets`}, but ${holdWhy}, so same weights today.`);
-    return plan('reps', ws, rr, `Same weights as last time, set by set. Go for one more rep on each (top of the range is ${hi}).`);
+    if (ups) return plan('up', ws, rr, `${ups === 1 ? 'One set' : `${ups} sets`} hit ${hi}, so ${ups === 1 ? 'it goes' : 'they go'} up. The rest chase one more rep.`);
+    if (earned) return plan('hold', ws, rr, `You earned a jump, but ${holdWhy}. Same weights today.`);
+    return plan('reps', ws, rr, `Same weights as last time. One more rep each (top is ${hi}).`);
   }
 
   if (last.sets.length >= t.sets && reps.every(r => r >= hi)) {
-    if (!top) return plan('reps', prev, reps.map(r => r + 1), `You hit ${hi} on every set. Add a little weight or slow the reps down.`);
-    if (holdWhy) return plan('hold', prev, reps, `You earned a jump to ${round2(top + jumpFor(t, top))} lb, but ${holdWhy}, so stay at ${top} today. It'll be waiting next time.`);
+    if (!top) return plan('reps', prev, reps.map(r => r + 1), `${hi} on every set. Add a little weight or slow it down.`);
+    if (holdWhy) return plan('hold', prev, reps, `You earned ${round2(top + jumpFor(t, top))} lb, but ${holdWhy}. Stay at ${top} today, it'll keep.`);
     // A step bigger than 10% (20 → 25 lb dumbbells) has to be earned with 2 extra reps first.
     if (jumpFor(t, top) / top > 0.1 && !reps.every(r => r >= hi + 2)) {
-      return plan('reps', prev, fill(hi + 2), `${round2(top + jumpFor(t, top))} lb is a big step from ${top}, so earn it first: get ${hi + 2} on every set.`);
+      return plan('reps', prev, fill(hi + 2), `${round2(top + jumpFor(t, top))} lb is a big step, so earn it: ${hi + 2} on every set first.`);
     }
     const lastRir = last.sets[last.sets.length - 1].rir;
     const easy = (lastRir != null && lastRir >= 3) || opts.noted === 'lift-easy';
     const w = round2(top + jumpFor(t, top) * (easy ? 2 : 1));
-    return plan('up', fill(w), fill(lo), easy ? `You hit ${hi} on every set ${opts.noted === 'lift-easy' ? 'and wrote it felt easy' : 'with reps to spare'}, so it's a bigger jump to ${w} lb. Aim for ${lo} or more.` : `You hit ${hi} on every set last time, so it's up to ${w} lb. Aim for ${lo} or more.`);
+    return plan('up', fill(w), fill(lo), easy ? `${hi} on every set ${opts.noted === 'lift-easy' ? 'and you said it felt easy' : 'with reps to spare'}. Bigger jump: ${w} lb, aim for ${lo}+.` : `${hi} on every set last time. Up to ${w} lb, aim for ${lo}+.`);
   }
   if (short(last)) {
     const p2 = recent[1];
@@ -397,40 +406,40 @@ function coachPlan(t, recent, opts = {}) {
     if (top && p2 && short(p2) && prevTop >= top && daysBetween(p2.date, last.date) <= 21) {
       const step = t.inc || UP;
       const w = Math.max(step, Math.min(top - step, roundTo(top * 0.9, step)));
-      return plan('down', fill(w), fill(hi), `Two tough sessions in a row, so it's ${w} lb today. Build back up from here.`);
+      return plan('down', fill(w), fill(hi), `Two tough ones in a row. ${w} lb today, build back from here.`);
     }
-    return plan('hold', prev, reps.map(r => Math.max(r, lo)), `Stay at ${wTxt(top)} and get ${lo} on every set.`);
+    return plan('hold', prev, reps.map(r => Math.max(r, lo)), `Same ${wTxt(top)}. Go for ${lo} on every set.`);
   }
-  if (opts.energy === 'low') return plan('hold', prev, reps, `${opts.sick ? 'You noted being sick' : 'Low energy today'}, so just match last time at ${wTxt(top)}.`);
-  if (opts.noted === 'lift-pain' || opts.noted === 'lift-hard') return plan('hold', prev, reps, `Match last time at ${wTxt(top)}, since ${opts.noted === 'lift-pain' ? 'you noted pain here' : 'you wrote it felt hard'}.`);
+  if (opts.energy === 'low') return plan('hold', prev, reps, `${opts.sick ? 'Sick day' : 'Low energy'}, so just match last time at ${wTxt(top)}.`);
+  if (opts.noted === 'lift-pain' || opts.noted === 'lift-hard') return plan('hold', prev, reps, `Match last time at ${wTxt(top)}, since ${opts.noted === 'lift-pain' ? 'it hurt last time' : 'it felt hard last time'}.`);
   if (opts.noted === 'lift-easy') {
-    return plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 2))), `You wrote it felt easy, so same weight and go for two more reps per set (top of the range is ${hi}).`);
+    return plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 2))), `You said it felt easy. Same weight, two more reps a set (top is ${hi}).`);
   }
-  if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi)) return plan('hold', prev, reps, `Your last set was all-out, so match last time at ${wTxt(top)} before adding reps.`);
+  if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi)) return plan('hold', prev, reps, `Last set was all-out. Match ${wTxt(top)} before adding reps.`);
   return plan('reps', prev,
     Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 1))),
-    `Same weight. Go for one more rep per set (top of the range is ${hi}).`);
+    `Same weight, one more rep a set (top is ${hi}).`);
 }
 
 // Tailor the rest of today's sets to how this one went. Reps usually drop a little from set to set,
 // so only raise after a big early set, and only lower after a clear miss (2 short, or short on set 1).
 function adjustRest(w, e, j) {
   const t = targetOf(e), s = e.sets[j];
-  if (t.min == null && t.max == null) return '';
+  if (t.min == null && t.max == null) return null;
   // Easy days (low energy, deload) aim 2 reps lower on purpose, so judge sets against that.
   const easy = lowDay(w.date) || !!w.deload, cut = easy ? 2 : 0;
   const lo = Math.max(1, (t.min ?? t.max) - cut), hi = (t.max ?? t.min) - cut, step = t.inc || UP, w0 = +s.w;
   const rest = e.sets.filter((x, k) => k > j && !x.done && +x.w === w0);
-  if (!rest.length || !w0) return '';
+  if (!rest.length || !w0) return null;
   if (+s.r >= hi + 2 && j <= 1 && !easy) {
-    rest.forEach(x => { x.w = round2(w0 + step); x.r = lo; });
-    return `Strong set. Next set +${step} lb.`;
+    rest.forEach(x => { x.w = x.pw = round2(w0 + step); x.r = x.pr = lo; });
+    return { t: `Strong set. Next one +${step} lb.`, tone: 'up' };
   }
   if ((+s.r <= lo - 2 || (j === 0 && +s.r < lo)) && w0 > step) {
-    rest.forEach(x => { x.w = round2(w0 - step); x.r = lo; });
-    return `Under ${lo}. Next set −${step} lb to stay in range.`;
+    rest.forEach(x => { x.w = x.pw = round2(w0 - step); x.r = x.pr = lo; });
+    return { t: `Under ${lo}, so −${step} lb next set to stay in range.`, tone: 'down' };
   }
-  return '';
+  return null;
 }
 
 // One exercise for a session, with sets filled in from the coach's plan.
@@ -466,7 +475,7 @@ function fillSets(e, w) {
   let cb = rehab ? null : comeback(t, recent, w.date);
   // Building back after a break waits a session when today's an easy day or your note said hard or pain.
   const pause = cb && cb.kind === 'up' && (low ? 'today is an easy day' : [noted, recent[0] && recent[0].note].some(x => x && (x.k === 'lift-hard' || x.k === 'lift-pain')) ? 'your note said it was rough' : '');
-  if (pause) cb = { ...cb, kind: 'hold', ws: cb.ws.map(() => cb.from), note: `Same ${cb.from} lb as last time, since ${pause}. Building back resumes next session.` };
+  if (pause) cb = { ...cb, kind: 'hold', ws: cb.ws.map(() => cb.from), note: `Same ${cb.from} lb, since ${pause}. Building back picks up next time.` };
   if (cb) plan = { ...(plan || { prev: null }), kind: cb.kind, ws: cb.ws, w: Math.max(...cb.ws), from: cb.from, reps: cb.reps, note: cb.note };
   else if (plan && deload) plan = { ...plan, kind: 'hold', ws: plan.prev, w: plan.from, reps: plan.prev.map(() => t.min ?? t.max ?? 8), note: '' };
   if (plan && (care || rehab) && !cb) {
@@ -477,25 +486,26 @@ function fillSets(e, w) {
       plan = { ...plan, kind: 'down', ws: plan.ws.map(() => lw), w: lw, reps: plan.reps.map(() => 10), note: `${lw} lb today so 10 to 15 reps feel smooth.` };
     } else if (plan.w > top + step) {
       // No big jumps on a lift that bothers you: one step at a time.
-      plan = { ...plan, ws: plan.ws.map(x => Math.min(x, top + step)), w: Math.min(plan.w, top + step), note: `Up one step to ${round2(top + step)} lb. Aim for ${t.min ?? t.max} or more.` };
+      plan = { ...plan, ws: plan.ws.map(x => Math.min(x, top + step)), w: Math.min(plan.w, top + step), note: `Up one step to ${round2(top + step)} lb, aim for ${t.min ?? t.max}+.` };
     }
   }
   e.coach = plan ? { kind: plan.kind, note: plan.note, from: plan.from, w: plan.w, prev: plan.prev } : null;
   const sets = cb ? cb.n : t.sets;
-  const extra = deload && !cb ? `Deload week: ${Math.ceil(sets / 2) === 1 ? '1 set' : `${Math.ceil(sets / 2)} sets`}${plan ? " at last time's weights" : ''}, about 3 reps left in the tank.`
-    : low ? '2 sets today. Stop each one with 2 or 3 reps left in the tank.' : '';
+  const extra = deload && !cb ? `Deload: ${Math.ceil(sets / 2) === 1 ? '1 set' : `${Math.ceil(sets / 2)} sets`}${plan ? " at last time's weights" : ''}, about 3 left in the tank.`
+    : low ? '2 sets today. Stop each with 2 or 3 left in the tank.' : '';
   if (extra && (!plan || (deload && !cb))) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
   const helps = soreHelpers(e.name, w.date);
-  const noteCue = !noted ? '' : noted.k === 'lift-pain' ? 'Keep it light, and stop if it hurts.'
+  const noteCue = !noted ? '' : noted.k === 'lift-pain' ? 'Keep it light, stop if it hurts.'
     : noted.k === 'lift-cramp' && care !== 'cramp' ? CARE_CUES.cramp : '';
-  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', noteCue, helps ? `Your sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here, so go lighter and stop if it pulls.` : ''].filter(Boolean).join(' ');
+  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', noteCue, helps ? `Sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here. Go lighter, stop if it pulls.` : ''].filter(Boolean).join(' ');
   if (cue) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${cue}`.trim() } : { kind: 'hold', note: cue, from: 0, w: 0, prev: null };
   const n = deload && !cb ? Math.ceil(sets / 2) : low ? Math.min(2, sets) : sets;
   const done = e.sets.filter(s => s.done);
   e.sets = done.concat(Array.from({ length: Math.max(0, n - done.length) }, (_, m) => {
     const k = done.length + m;
     const r = plan ? plan.reps[Math.min(k, plan.reps.length - 1)] : null;
-    return plan ? { w: plan.ws[k], r: (low || deload) && r > 3 ? r - 2 : r, done: false }
+    const pr = plan && (low || deload) && r > 3 ? r - 2 : r;
+    return plan ? { w: plan.ws[k], r: pr, done: false, pw: plan.ws[k], pr }
       : { w: '', r: t.min ?? t.max ?? '', done: false };
   }));
 }
@@ -511,11 +521,11 @@ function comeback(t, recent, date) {
   const fill = (v, n = t.sets) => Array(n).fill(v);
   if (gap >= 21) {
     const away = gap > 90 ? `about ${Math.round(gap / 30)} months` : `${wks} weeks`;
-    if (!top) return { kind: 'hold', ws: fill(0), reps: fill(lo), n: Math.max(2, t.sets - 1), from: 0, note: `First time in ${away}. Aim for ${lo} reps and see how it feels.` };
-    if (gap <= 42) return { kind: 'hold', ws: fill(top), reps: fill(lo), n: t.sets, from: top, note: `First time in ${away}, so the same ${top} lb as last time and ${lo} reps. Strength holds well this long.` };
+    if (!top) return { kind: 'hold', ws: fill(0), reps: fill(lo), n: Math.max(2, t.sets - 1), from: 0, note: `First time in ${away}. Aim for ${lo} and see how it feels.` };
+    if (gap <= 42) return { kind: 'hold', ws: fill(top), reps: fill(lo), n: t.sets, from: top, note: `First time in ${away}. Same ${top} lb, ${lo} reps. Strength holds fine this long.` };
     const pct = gap > 90 ? 0.7 : 0.85, n = gap > 90 ? 2 : Math.max(2, t.sets - 1);
     const w = Math.max(step, roundTo(top * pct, step));
-    return { kind: 'down', ws: fill(w, n), reps: fill(lo, n), n, from: top, note: `First time in ${away}, so ${n} sets at ${w} lb today (about ${Math.round(pct * 100)}%) to ease back in. It builds each session until you're back to ${t.sets} sets at ${top} lb.` };
+    return { kind: 'down', ws: fill(w, n), reps: fill(lo, n), n, from: top, note: `First time in ${away}, so ${n} sets at ${w} lb (about ${Math.round(pct * 100)}%) to ease in. Builds back to ${t.sets} × ${top} lb from here.` };
   }
   // Already back for a session or few: find where the break was and the weight from before it.
   const k = recent.findIndex((p, i) => i < 4 && recent[i + 1] && daysBetween(recent[i + 1].date, p.date) >= 21);
@@ -523,16 +533,16 @@ function comeback(t, recent, date) {
   const oldTop = topOf(recent[k + 1]);
   if (top >= oldTop || last.sets.length < 2 || last.sets.some(s => +s.r < lo)) return null;
   const w = Math.min(oldTop, round2(top + jumpFor(t, top)));
-  return { kind: 'up', ws: fill(w), reps: fill(lo), n: t.sets, from: top, note: `Building back to ${oldTop} lb: up a step each session while you get ${lo} reps.` };
+  return { kind: 'up', ws: fill(w), reps: fill(lo), n: t.sets, from: top, note: `Building back to ${oldTop} lb, a step each session.` };
 }
 // Lifts you've marked as bothering you (More options on an exercise), by name.
 const careOf = name => (S.settings.care || {})[keyOf(name)] || null;
 const CARE_CUES = {
-  pressure: 'Go easy: breathe out as you push, skip the big held breath, and keep it where 10 to 15 reps feel smooth. If it aches, swap it.',
-  joint: 'Easy on the joint: smooth, controlled reps, and stop if it hurts.',
-  cramp: 'Cramped up here before? Go a bit lighter and slower, and sip water between sets.',
+  pressure: 'Easy does it: breathe out as you push, no big breath-hold, 10 to 15 smooth reps. Aches? Swap it.',
+  joint: 'Smooth, controlled reps. Stop if it hurts.',
+  cramp: 'Cramped here before. A bit lighter and slower, sip water between sets.',
 };
-const REHAB_CUE = 'Shoulder care: light and smooth, and stop well before it burns. If your physical therapist gave you numbers, use theirs.';
+const REHAB_CUE = 'Shoulder care: light and smooth, stop well before it burns. Your PT\'s numbers win if you have them.';
 
 function buildSession(dayKey, date) {
   const day = planOf(dayKey) || BLANK_PLAN;
@@ -665,8 +675,8 @@ function noteBanner(date) {
   const sick = !energyFor(date) && sickNoted(date), cramp = notedSince(addDays(date, -1), 1, ['cramp'])[0];
   const day = d => (d === addDays(date, -1) ? 'yesterday' : esc(fmtDate(d, { weekday: 'long' })));
   const lines = [];
-  if (sick) lines.push(`<b>You noted being sick ${day(sick.date)}.</b> Today's plan goes easy: 2 sets a lift, no weight jumps, and a walk instead of a run. Feel fine? Check in as OK or Great above.`);
-  if (cramp) lines.push(`<b>You noted cramps ${day(cramp.date)}.</b> Drink water and have something salty an hour or so before you train.`);
+  if (sick) lines.push(`<b>Sick ${day(sick.date)}.</b> Going easy: 2 sets a lift, no jumps, a walk instead of a run. Feeling fine? Check in OK or Great above.`);
+  if (cramp) lines.push(`<b>Cramps ${day(cramp.date)}.</b> Water and something salty an hour before you train.`);
   return lines.length ? `<div class="card note-banner">${lines.map(l => `<div>${l}</div>`).join('')}</div>` : '';
 }
 function soreCard(w) {
@@ -679,8 +689,8 @@ function soreCard(w) {
     <div class="lbl" style="margin-top:0">Too sore for something today?</div>
     <div class="chips">${Object.entries(SORE_GROUPS).map(([k, [n]]) => `<button class="chip ${on.includes(k) ? 'on' : sug.some(x => x.about === k) ? 'sug' : ''}" data-a="sore-tog" data-g="${k}">${n}</button>`).join('')}</div>
     ${sug.map(x => `<div class="note-sug"><span>Your notes ${day(x.date)}: <b>${esc(x.k === 'pain-part' ? `${x.word} pain` : `sore ${x.word}`)}</b></span><button class="linkbtn" data-a="sore-tog" data-g="${x.about}">Work around ${MUSCLE_GROUP_NAME[x.about]}</button></div>`).join('')}
-    ${on.length ? `<div class="sh-hint">${out.length ? `Sitting out: <b>${out.map(e => esc(e.name)).join(', ')}</b>.` : 'Nothing today works that hard.'}${add.length ? ` Added: <b>${add.map(e => esc(e.name)).join(', ')}</b>, for muscles that are behind this week.` : ''} Tap again to undo.</div>`
-      : '<div class="sh-hint">Pick it, and today\'s lifts for it sit out while other muscles fill in.</div>'}
+    ${on.length ? `<div class="sh-hint">${out.length ? `Sitting out: <b>${out.map(e => esc(e.name)).join(', ')}</b>.` : 'Nothing today hits it hard.'}${add.length ? ` Added: <b>${add.map(e => esc(e.name)).join(', ')}</b>, for muscles behind this week.` : ''} Tap again to undo.</div>`
+      : '<div class="sh-hint">Tap one and its lifts sit out while other muscles fill in.</div>'}
   </div>`;
 }
 function weeklyVolume(ws) {
@@ -704,7 +714,7 @@ function warmupFor(w, i) {
   const wt = +(e.sets.find(x => x.w !== '') || {}).w || 0;
   if (wt < 60) return '';
   const step = targetOf(e).inc || UP, r = v => Math.max(step, roundTo(wt * v, step));
-  return `Warm up first (not logged): ${r(0.5)} × 8, then ${r(0.7)} × 3.`;
+  return `Warm-up (not logged): ${r(0.5)} × 8, then ${r(0.7)} × 3.`;
 }
 // After a set: how many more could you have done? Easy early sets move the next ones up a step.
 // A lighter week after about 7 weeks of steady training, or sooner when 3 or more lifts have stalled.
@@ -738,12 +748,12 @@ function deloadCalc(date, st) {
 }
 function deloadCard(date) {
   const d = deloadState(date);
-  if (d.active) return `<div class="card coach coach-hold deload"><span>→ Deload week until ${esc(fmtDate(d.until, { weekday: 'short', month: 'short', day: 'numeric' }))}: half the sets at your usual weights. Your body rebuilds this week.</span><button data-a="deload-end">End now</button></div>`;
+  if (d.active) return `<div class="card coach coach-hold deload"><span>→ Deload week through ${esc(fmtDate(d.until, { weekday: 'short', month: 'short', day: 'numeric' }))}: half the sets, usual weights. This is when you rebuild.</span><button data-a="deload-end">End now</button></div>`;
   if (!d.suggest) return '';
   const why = d.stalls >= 3 ? `${d.stalls} lifts have stalled` : `You've trained ${d.weeks} weeks straight`;
   return `<div class="card plan">
     <div class="ss-tag">Time for a lighter week?</div>
-    <div class="sh-hint" style="margin-top:6px">${why}. For 7 days: half the sets at the same weights, stopping with about 3 reps left. You come back stronger.</div>
+    <div class="sh-hint" style="margin-top:6px">${why}. For a week: half the sets, same weights, about 3 left in the tank. You come back stronger.</div>
     <div class="btn-row" style="margin-top:12px"><button class="btn pri" data-a="deload-start">Start it</button><button class="btn" data-a="deload-snooze">Not now</button></div>
   </div>`;
 }
@@ -796,19 +806,369 @@ function logSet(w, i, j) {
   s.at = Date.now();
   e.sets.forEach((x, k) => { if (k > j && !x.done && x.w === '') x.w = s.w; });
   const today = isLive(w);
-  const msgs = [];
-  if (today) { const tip = adjustRest(w, e, j); if (tip) msgs.push(tip); }
+  let say = null;
+  if (today) {
+    say = setReaction(w, i, j, adjustRest(w, e, j));
+    if (say) S.say[`${w.id}:${e.key}`] = { ...say, at: Date.now() };
+  }
   persist(w);
   haptic();
   // In a superset, rest only after the whole round is done.
   if (today) {
     const grp = w.exercises.filter(x => x.group === e.group);
     const roundDone = grp.every(x => !x.sets[j] || x.sets[j].done);
-    if (roundDone) startTimer(restFor(w, e));
-    else msgs.push(`Next: ${grp.find(x => x.sets[j] && !x.sets[j].done).name}`);
+    if (roundDone) startTimer(restFor(w, e) + ((say && say.rest) || 0));
+    else toast(`Next: ${grp.find(x => x.sets[j] && !x.sets[j].done).name}`);
   }
-  if (msgs.length) toast(msgs.join(' · '));
   render();
+}
+
+// ---------- pocket coach ----------
+// One voice across the app: short, casual, and only when it's worth saying. Lines are worked out live
+// from what you've logged and the time of day, and they're only ever about today. Past days show
+// exactly what you logged.
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const anyOf = a => a[Math.floor(Math.random() * a.length)];
+// The same pick all day for a given seed, so a line doesn't flicker between renders.
+const dayPick = (a, seed) => { let h = 0; for (const ch of `${todayStr()}|${seed}`) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return a[h % a.length]; };
+const hourNow = () => { const d = new Date(); return d.getHours() + d.getMinutes() / 60; };
+const clockNow = () => new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).replace(':00', '').replace(' ', '').toLowerCase();
+const median = a => { const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const pctUp = (a, b) => Math.round((a / b - 1) * 100);
+
+// The science behind a line, for its ⓘ.
+const WHY = {
+  rest: { title: 'Why rest longer?', body: ['Longer rests between hard sets (about 2 to 3 minutes on big lifts) get you more reps, and more good reps means more growth.', 'A big drop in reps usually means you came back before you were ready.'] },
+  sessionSets: { title: 'Why stop there?', body: ['Past about 10 hard sets for one muscle in one workout, extra sets add a lot less. Spreading them across the week works better.', 'Energy left over? Bank it for next time.'] },
+  rir: { title: 'Reps in the tank', body: ['Stopping 1 or 2 reps short of failure builds about as much muscle as going all-out, with less fatigue, so you recover faster.', 'All-out now and then is fine, especially on a last set.'] },
+  bed: { title: 'Protein before bed', body: ['A slow protein before sleep (cottage cheese, Greek yogurt, or casein) keeps muscle repair going overnight.', 'It counts toward your daily total like anything else.'] },
+  gap: { title: 'Spreading it out', body: ['Protein every 3 to 5 hours keeps muscle building topped up through the day.', 'Your daily total still matters most. Spacing it out is the bonus.'] },
+  water: { title: 'Daily weight swings', body: ['Weight swings 1 to 3 lb day to day from water, salt, carbs, and when you last ate. That isn’t fat.', 'The 7-day average is the real trend, so that’s the one to watch.'] },
+  weigh: { title: 'Why the morning?', body: ['After the bathroom and before you eat or drink is your most consistent weight, so day-to-day numbers compare fairly.'] },
+  rest_day: { title: 'Rest days', body: ['Lifting is the signal. Muscle actually gets built while you recover, so rest days are part of the plan.', 'Easy movement like a walk helps you feel fresh without cutting into recovery.'] },
+};
+const mealWhy = (g, kg) => ({ title: 'How much per meal', body: [`About 0.4 g per kg of bodyweight per meal works well, so roughly ${g} g for you, 3 to 5 times a day.`, 'Bigger servings still count. The daily total matters most.', `Based on ${Math.round(kg * 2.2046)} lb.`] });
+
+// ----- every earlier session of a lift -----
+// Estimated max uses weight × reps (sets of 15 or fewer, where it's a fair guess at strength).
+const bestE1 = sets => Math.max(0, ...sets.filter(s => +s.w > 0 && +s.r > 0 && +s.r <= 15).map(s => e1rm(+s.w, +s.r)));
+const bestSetTxt = sets => { const b = [...sets].sort((x, y) => e1rm(+y.w, +y.r) - e1rm(+x.w, +x.r))[0]; return b ? `${fmtW(b.w)} × ${b.r}` : ''; };
+function liftHist(key, w) {
+  const out = [];
+  for (const o of sortedW()) {
+    if (o.id === w.id || o.date > w.date || (o.date === w.date && o.createdAt > w.createdAt)) continue;
+    const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length);
+    if (!e) continue;
+    const sets = doneSets(e);
+    out.push({ date: o.date, sets, e1: bestE1(sets) });
+  }
+  return out;
+}
+const bestIn = (h, from, to) => h.filter(p => p.date >= from && p.date <= to && p.e1).sort((a, b) => b.e1 - a.e1)[0] || null;
+// The last break of 3+ weeks in the past 8 weeks, and your best before it.
+function breakBefore(h, date) {
+  for (let k = 0; k < h.length - 1 && k < 6; k++) {
+    if (h[k].date < addDays(date, -56)) break;
+    if (daysBetween(h[k + 1].date, h[k].date) >= 21) return { best: Math.max(...h.slice(k + 1, k + 4).map(p => p.e1)), since: k };
+  }
+  return null;
+}
+// How today's best set compares with around this time last year, about a month ago, or when you first
+// logged it. Only worth a mention when it's a real step: +5% on a year or a month, +10% since the start.
+function longView(e, w, h) {
+  const cur = bestE1(doneSets(e));
+  if (!cur || !h.length) return null;
+  const yr = bestIn(h, addDays(w.date, -410), addDays(w.date, -320)), mo = bestIn(h, addDays(w.date, -60), addDays(w.date, -21));
+  // Well under your best (coming back from time off), "since you started" and "since last month" would
+  // flatter a dip, so only a year-on-year gain counts then.
+  const peak = Math.max(...h.map(p => p.e1)), dip = cur < peak * 0.9;
+  const first = h.filter(p => p.e1).slice(-3).sort((a, b) => b.e1 - a.e1)[0], start = !dip && h.length >= 6 && first && daysBetween(h[h.length - 1].date, w.date) >= 90 ? first : null;
+  const why = (p, when) => ({ title: `Since ${when}`, body: [`${fmtDate(p.date, { month: 'short', day: 'numeric', year: 'numeric' })}: ${bestSetTxt(p.sets)}.`, `Today: ${bestSetTxt(doneSets(e))}.`, 'Compared by estimated max (weight and reps together), so different rep counts still line up.'] });
+  if (yr && cur >= yr.e1 * 1.05) return { k: 'year', pct: pctUp(cur, yr.e1), t: `Up ${pctUp(cur, yr.e1)}% on ${e.name} since this time last year. 📈`, why: why(yr, 'this time last year') };
+  if (start && cur >= start.e1 * 1.1) {
+    const when = fmtDate(h[h.length - 1].date, { month: 'long', year: daysBetween(h[h.length - 1].date, w.date) > 300 ? 'numeric' : undefined });
+    return { k: 'start', pct: pctUp(cur, start.e1), t: `Up ${pctUp(cur, start.e1)}% on ${e.name} since you started it in ${when}. 📈`, why: why(start, 'your first sessions') };
+  }
+  if (mo && !dip && cur >= mo.e1 * 1.05) return { k: 'month', pct: pctUp(cur, mo.e1), t: `Up ${pctUp(cur, mo.e1)}% on this since a month ago. Keep stacking.`, why: why(mo, 'a month ago') };
+  return null;
+}
+
+// The coach remembers what it told you about each lift's long-term progress, and only brings it up
+// again with real news: 3 weeks later and 5 points higher, or a different comparison after 2 weeks.
+const coachMem = () => S.settings.coachMem || (S.settings.coachMem = {});
+function lvFresh(key, lv, date) {
+  const m = coachMem()[key];
+  if (!m || m.date === date) return true;
+  const days = daysBetween(m.date, date);
+  return m.k === lv.k ? days >= 21 && lv.pct >= m.pct + 5 : days >= 14;
+}
+function lvRemember(key, lv, date) { coachMem()[key] = { k: lv.k, pct: lv.pct, date }; saveSettings(); }
+
+// ----- after a set -----
+// Everything worth saying gets a score; the best one shows under the lift, or nothing does.
+// Things to act on (weights changing, a big rep drop, an easy day) always show. Praise and history
+// show for big moments, or after a few quiet sets, so it never turns into a stream of chatter.
+const sayState = w => S.said[w.id] || (S.said[w.id] = { once: {}, quiet: 0 });
+function setReaction(w, i, j, tip) {
+  const e = w.exercises[i], s = e.sets[j], t = targetOf(e), st = sayState(w);
+  const ranged = t.min != null || t.max != null, lo = t.min ?? t.max, hi = t.max ?? t.min;
+  const easyDay = lowDay(w.date) || !!w.deload, cut = easyDay ? 2 : 0;
+  const wt = +s.w || 0, r = +s.r || 0, done = doneSets(e), allDone = e.sets.every(x => x.done);
+  const h = liftHist(e.key, w), c = [];
+  const add = (k, score, text, tone, x = {}) => { if (!x.once || !st.once[x.once]) c.push({ k, score, t: text, tone, ...x }); };
+  if (tip) add('adjust', 90, tip.t, tip.tone, { act: true });
+
+  // New bests. One more rep than last week is the plan working, so the big moments are a weight you've
+  // never handled for real reps, or a clear jump (3%+) in estimated max. Small bests wait their turn.
+  const e1 = wt && r <= 15 ? e1rm(wt, r) : 0, allBest = Math.max(0, ...h.map(p => p.e1));
+  const heaviest = Math.max(0, ...h.flatMap(p => p.sets.map(x => +x.w || 0)));
+  const prWhy = { title: 'A new best', body: [`${fmtW(wt)} × ${r} works out to an estimated max of ${Math.round(e1)} lb.`, `Your best before today was about ${Math.round(allBest)} lb.`, 'Estimated max uses weight and reps together, so 10 reps at 100 and 6 at 115 compare fairly.'] };
+  if (h.length >= 3 && wt > heaviest && heaviest && r >= (ranged ? Math.max(3, lo - 2) : 3)) add('pr', 88, `Heaviest you've ever gone on ${e.name}. 🎉`, 'good', { once: `pr:${e.key}`, big: true, why: prWhy });
+  else if (e1 && h.length >= 3 && allBest && e1 > allBest * 1.03) add('pr', 82, dayPick([`New best on ${e.name}. 🎉`, `Strongest ${e.name} you've ever logged. 🎉`], e.key), 'good', { once: `pr:${e.key}`, big: true, why: prWhy });
+  else if (h.length >= 3) {
+    const before = h.flatMap(p => p.sets.filter(x => (+x.w || 0) >= wt && (wt || !+x.w)).map(x => +x.r));
+    if (before.length && r >= Math.max(...before) + 2) add('reps-pr', 55, wt ? `Most reps you've ever done at ${fmtW(wt)} lb. 💪` : 'Most reps you\'ve ever done in a set. 💪', 'good', { once: `rp:${e.key}` });
+  }
+
+  // Signs you're pushing too hard, or coming back before you're ready.
+  const prev = j > 0 ? e.sets[j - 1] : null;
+  if (prev && prev.done && ranged && +prev.w === wt && wt) {
+    const drop = +prev.r - r;
+    if (drop >= Math.max(3, Math.ceil(+prev.r * 0.3)) && r < lo - cut) add('drop', 65, 'Big drop from your last set. Adding 30 sec to your rest.', 'care', { act: true, rest: 30, why: WHY.rest });
+    // Caught-up logging (ticks seconds apart) doesn't count; a real short rest that cost reps does.
+    const gap = (s.at - (prev.at || 0)) / 1000, solo = w.exercises.filter(x => x.group === e.group).length === 1;
+    if (solo && t.kind !== 'iso' && gap >= 20 && gap < 60 && r < (+s.pr || lo)) add('fast', 55, 'Quick turnaround. A full rest gets you more reps.', 'care', { act: true, once: 'fast', why: WHY.rest });
+  }
+  const pw = s.pw === '' || s.pw == null ? null : +s.pw;
+  if (easyDay && pw != null && (wt > pw || (s.pr && r >= +s.pr + 3))) add('easy', 60, 'Easy day, remember. Leave 2 or 3 in the tank.', 'care', { act: true, once: 'easy' });
+  else if (!easyDay && pw && wt >= pw * 1.1 && ranged && r >= lo) add('heavy', 50, `Went heavier and still hit ${r}. Strong.`, 'good', { once: `hv:${e.key}` });
+  if (t.sets && j + 1 >= t.sets + 2) add('extra', 48, `${j + 1 - t.sets} extra sets on this one. Fine if it feels good, but the payoff tapers from here.`, 'care', { act: true, once: `x:${e.key}`, why: WHY.sessionSets });
+  Object.entries(musclesOf(e.name)).filter(([, f]) => f >= 1).forEach(([m]) => {
+    const n = sum(w.exercises.map(x => ((musclesOf(x.name)[m] || 0) >= 1 ? doneSets(x).length : 0)));
+    const planned = sum(w.exercises.map(x => ((musclesOf(x.name)[m] || 0) >= 1 ? x.target.sets || 0 : 0)));
+    if (n > 10 && n > planned) add('muscle', 55, `That's ${n} ${MUSCLES[m].toLowerCase()} sets today. Past about 10, more in one go adds little.`, 'care', { act: true, once: `m:${m}`, why: WHY.sessionSets });
+  });
+
+  // Beat last time on this set (more than the plan's one extra rep).
+  const last = h[0], ls = last && last.sets[Math.min(j, last.sets.length - 1)];
+  if (ls && daysBetween(last.date, w.date) < 21) {
+    const more = r - +ls.r;
+    if (wt === +ls.w && more >= 2) add('beat', 45, `${more} more reps than last time. 💪`, 'good', { once: `bt:${e.key}` });
+    else if (wt > +ls.w && +ls.w && more >= 1) add('beat', 45, `More weight and more reps than last time. 💪`, 'good', { once: `bt:${e.key}` });
+  }
+
+  // Finishing a lift: the bigger picture.
+  if (allDone) {
+    const brk = breakBefore(h, w.date), cur = bestE1(done);
+    if (brk && !st.once[`pr:${e.key}`] && cur >= brk.best * 0.97 && h[0].e1 < brk.best * 0.97) add('back', 80, `Back to your pre-break numbers on ${e.name}. 🙌`, 'good', { once: `bk:${e.key}` });
+    // A new best on this lift today already says it, and the same news doesn't repeat week after week.
+    const lv = !st.once[`pr:${e.key}`] && longView(e, w, h);
+    if (lv && lvFresh(e.key, lv, w.date)) add(lv.k, lv.k === 'month' ? 60 : 75, lv.t, 'good', { once: `lv:${e.key}`, big: true, lv, why: lv.why });
+    if (ranged && !easyDay && done.length >= t.sets && done.some(x => +x.w > 0) && done.every(x => +x.r >= hi)) add('top', 55, `Every set at ${hi}. Weight goes up next time.`, 'good', { once: `top:${e.key}` });
+  }
+
+  c.sort((a, b) => b.score - a.score);
+  // Two big moments a workout, then even good news waits for a few quiet sets.
+  // A weight you've never lifted before always gets its moment.
+  const acts = c.filter(x => x.act), praise = c.find(x => !x.act && (x.score >= 88 || (x.score >= 70 && (st.big || 0) < 2) || st.quiet >= 3));
+  if (!acts.length && !praise) { st.quiet++; return null; }
+  st.quiet = 0;
+  // A weight change and a big rep drop on the same set: one line, with the longer rest.
+  let act = acts[0];
+  const drop = acts.find(x => x.k === 'drop');
+  if (act && drop && act !== drop) act = { ...act, t: `${act.t} Adding 30 sec to your rest too.`, rest: drop.rest, why: drop.why };
+  [...acts, praise].forEach(x => { if (x && x.once) st.once[x.once] = true; });
+  if (praise && praise.score >= 70) st.big = (st.big || 0) + 1;
+  if (praise && praise.lv) lvRemember(e.key, praise.lv, w.date);
+  // A big moment and something to act on: say both, the good news first.
+  if (act && praise && praise.score >= 70) return { ...praise, t: `${praise.t} ${act.t}`, tone: act.tone === 'care' ? 'care' : praise.tone, rest: act.rest, why: act.why || praise.why, score: praise.score };
+  return act || praise;
+}
+// After "how many more could you have done?" on a lift's last set.
+function rirReaction(w, i) {
+  const e = w.exercises[i], s = e.sets[e.sets.length - 1], t = targetOf(e), st = sayState(w);
+  const hi = t.max ?? t.min, top = hi != null && doneSets(e).length >= t.sets && doneSets(e).every(x => +x.r >= hi);
+  const zeros = w.exercises.filter(x => x.sets.length && x.sets[x.sets.length - 1].rir === 0).length;
+  if (s.rir === 0 && zeros >= 3 && !st.once.rir0x) { st.once.rir0x = true; return { t: "That's a lot of all-out sets today. 1 or 2 in the tank builds just as well.", tone: 'care', score: 50, why: WHY.rir }; }
+  if (s.rir === 0 && !st.once.rir0) { st.once.rir0 = true; return { t: 'All out. Fine sometimes. Stopping 1 or 2 short grows you just as well.', tone: 'care', score: 50, why: WHY.rir }; }
+  if (s.rir === 3 && top) return { t: 'Lots left and every set at the top. Bigger jump next time.', tone: 'good', score: 55 };
+  if (s.rir === 3 && hi != null) return { t: "Lots left. Chase more reps next time, you've got them.", tone: 'good', score: 45 };
+  return null;
+}
+// Keeps a closing emoji on the same line as the word before it.
+const nb = t => esc(t).replace(/ (\p{Extended_Pictographic})/gu, '\u00a0$1');
+const SAY_MARK = { good: '✓', care: '!', up: '▲', down: '▼' };
+function sayHTML(w, i, small) {
+  const k = `${w.id}:${w.exercises[i].key}`, x = isLive(w) && S.say[k];
+  if (!x) return '';
+  const fresh = Date.now() - x.at < 1500 ? ' fresh' : '';
+  const inner = `<span class="say-mark">${SAY_MARK[x.tone] || '›'}</span><span>${nb(x.t)}</span>`;
+  if (small) return `<span class="fold-say say-${x.tone}">${inner}</span>`;
+  return x.why ? `<button class="say say-${x.tone}${fresh}" data-a="say-why" data-k="${esc(k)}">${inner}<i>ⓘ</i></button>` : `<div class="say say-${x.tone}${fresh}">${inner}</div>`;
+}
+
+// ----- protein through the day -----
+// Your usual eating hours, learned from when you log food (8am to 9pm until there's enough to go on).
+function eatWindow() {
+  const firsts = [], lasts = [], today = todayStr();
+  Object.values(S.body).forEach(b => {
+    if (b.date >= today || b.date < addDays(today, -30)) return;
+    const ats = (b.items || []).map(x => x.at).filter(Boolean);
+    if (ats.length < 2) return;
+    const hr = t => { const d = new Date(t); return d.getHours() + d.getMinutes() / 60; };
+    firsts.push(hr(Math.min(...ats))); lasts.push(hr(Math.max(...ats)));
+  });
+  if (firsts.length < 7) return { start: 8, end: 21 };
+  const start = clamp(median(firsts), 5, 12), end = clamp(median(lasts) + 0.5, Math.max(17, start + 8), 24);
+  return { start, end };
+}
+// How much you've usually had by this time of day, from the last 3 weeks of logged days.
+function usualBy(h) {
+  const today = todayStr(), got = [];
+  Object.values(S.body).forEach(b => {
+    if (b.date >= today || b.date < addDays(today, -21)) return;
+    const items = (b.items || []).filter(x => x.at);
+    if (items.length < 2 || b.protein < 0.6 * proteinTargetFor(b.date)) return;
+    got.push(sum(items.filter(x => { const d = new Date(x.at); return d.getHours() + d.getMinutes() / 60 <= h; }).map(x => +x.g || 0)));
+  });
+  return got.length >= 5 ? Math.round(median(got) / 5) * 5 : null;
+}
+// A saved food close to what you need, leaning on the ones you use most.
+// Before bed, slow-digesting ones (yogurt, cottage cheese, casein, milk) come first.
+const SLOW_FOOD = /yogh?urt|cottage|casein|skyr|quark|milk|cheese/i;
+function foodFor(need, slow) {
+  const fs = S.foods.filter(f => +f.g >= 10);
+  if (!fs.length) return null;
+  const aim = clamp(need, 20, 50);
+  return fs.map(f => ({ f, s: Math.abs(f.g - aim) / 8 - Math.log2(1 + (f.used || 0)) - (f.fav ? 1 : 0) - (slow && SLOW_FOOD.test(f.name) ? 4 : 0) })).sort((a, b) => a.s - b.s)[0].f;
+}
+// "Protein shake" reads as "your protein shake" mid-sentence; names like "PB&J" stay as typed.
+const lcFirst = n => (/^[A-Z][a-z]/.test(n) ? n[0].toLowerCase() + n.slice(1) : n);
+function proteinCoach(date) {
+  if (date !== todayStr()) return null;
+  const b = bodyEntry(date), target = proteinTargetFor(date), have = b.protein, left = target - have, h = hourNow();
+  const kg = ((latestWeighIn(date) || {}).weight || 170) / 2.2046, meal = clamp(Math.round(0.4 * kg / 5) * 5, 25, 50);
+  const win = eatWindow(), usual = usualBy(h);
+  const linear = target * clamp((h - win.start) / (win.end - win.start), 0, 1);
+  const pace = usual != null ? Math.min(target, (usual + linear) / 2) : linear;
+  const base = { left, have, target };
+  if (left <= 0) return { ...base, t: have >= target * 1.4 ? "Way past target. Extra's fine, it just won't build more." : dayPick(['Target hit. 💪', 'Protein done for the day. Nice.', 'Target hit. Your muscles thank you.'], 'p'), tone: 'good' };
+  if (h >= win.end - 0.5) {
+    const f = foodFor(Math.min(left, 40), true);
+    return { ...base, behind: true, urgent: left > 20, t: left <= meal * 1.2 ? `${left} g left. ${f && f.name ? `Your ${lcFirst(f.name)} before bed` : 'Greek yogurt or cottage cheese before bed'} closes it out.` : `${left} g left tonight. Get what you can, a slow protein before bed is a solid move.`, food: f, why: WHY.bed, tone: 'care' };
+  }
+  if (!have && h < Math.max(11, win.start + 3)) {
+    const f = foodFor(meal);
+    return { ...base, t: `Start with about ${meal} g at your first meal. It sets up the day.`, food: f, why: mealWhy(meal, kg), tone: '' };
+  }
+  const lastAt = Math.max(0, ...b.items.map(x => x.at || 0)), gapH = lastAt ? (Date.now() - lastAt) / 36e5 : null;
+  const behind = pace - have >= Math.max(20, 0.18 * target);
+  if (h >= 17 && left > meal * 2.5) return { ...base, behind: true, urgent: true, t: `${left} g to go. A big protein dinner plus a shake gets you there.`, food: foodFor(meal), why: mealWhy(meal, kg), tone: 'care' };
+  if (behind && h >= 11) {
+    const f = foodFor(Math.min(left, meal));
+    return { ...base, behind: true, urgent: h >= 13, t: `It's ${clockNow()} and you're at ${have} g${usual != null && usual > have + 15 ? ` (usually ~${usual} by now)` : ''}. ${f && f.name ? `Grab your ${lcFirst(f.name)} now` : 'Grab a shake now'} and you're back on pace.`, food: f, why: mealWhy(meal, kg), tone: 'care' };
+  }
+  if (gapH != null && gapH >= 4.5 && h < win.end - 1.5 && left > 20) return { ...base, t: `${Math.floor(gapH)} hours since your last protein. Good time for a snack.`, food: foodFor(Math.min(left, meal)), why: WHY.gap, tone: '' };
+  if (have >= pace + 0.15 * target && have) return { ...base, t: `Ahead of pace. ${left} g to go. 🙌`, tone: 'good' };
+  return { ...base, t: `${left} g to go. Right on pace.`, tone: '' };
+}
+function proteinSayHTML(pc, src) {
+  if (!pc) return '';
+  const add = pc.food ? `<button class="pc-add" data-a="food-quick" data-n="${esc(pc.food.name)}">+ ${esc(pc.food.name || 'Protein')} · ${pc.food.g} g</button>` : '';
+  return `<div class="pcoach ${pc.tone || ''}">${pc.why ? `<button class="pc-txt" data-a="coach-why" data-k="protein">${nb(pc.t)}&nbsp;<i>ⓘ</i></button>` : `<span class="pc-txt">${nb(pc.t)}</span>`}${add}</div>`;
+}
+// What adding food does to the day, as a quick toast.
+function proteinAddSay(g, date) {
+  const b = bodyEntry(date), target = proteinTargetFor(date), left = target - b.protein, before = b.protein - g;
+  if (date !== todayStr()) return `Added ${g} g`;
+  if (before < target && left <= 0) return dayPick(['Target hit! 🎉', 'That does it. Target hit! 🎉', 'Protein done. 🎉'], 'hit');
+  if (left <= 0) return `+${g} g`;
+  if (left <= 20) return `+${g} g · almost there, ${left} to go`;
+  return `+${g} g · ${left} to go`;
+}
+
+// ----- weigh-ins -----
+// Day-to-day swings are mostly water, so a big one gets a calm word. A new low or high in the
+// 7-day average that matches your goal gets a nod. Everything else stays quiet.
+function weighSay(b) {
+  if (b.date !== todayStr() || b.weight == null) return null;
+  const prev = Object.values(S.body).filter(x => x.date < b.date && x.date >= addDays(b.date, -3) && x.weight != null).sort((x, y) => y.date.localeCompare(x.date))[0];
+  const diff = prev ? round1(b.weight - prev.weight) : 0, when = prev && prev.date === addDays(b.date, -1) ? 'yesterday' : prev ? fmtDate(prev.date, { weekday: 'long' }) : '';
+  if (Math.abs(diff) >= 1.5) return diff > 0 ? `Up ${diff} since ${when}. That's water and salt, not fat. The 7-day average is what counts.` : `Down ${-diff} since ${when}. Mostly water, so watch the 7-day average.`;
+  const t = weightTrend(b.date), goal = S.settings.goal;
+  if (!t || (goal !== 'cut' && goal !== 'bulk')) return null;
+  const avgs = [];
+  for (let k = 1; k <= 60; k++) { const x = weightTrend(addDays(b.date, -k)); if (x) avgs.push(x.avg); }
+  if (avgs.length < 14) return null;
+  if (goal === 'cut' && t.avg < Math.min(...avgs)) return `Lowest 7-day average in ${avgs.length >= 50 ? '2 months' : 'a while'}: ${t.avg} lb. 👌`;
+  if (goal === 'bulk' && t.avg > Math.max(...avgs) && (t.pct == null || t.pct <= GOALS.bulk.hi)) return `Highest 7-day average yet: ${t.avg} lb, at a steady pace. 👌`;
+  return null;
+}
+
+// ----- the line at the top of Today -----
+// One thing, the most useful right now: the wrap-up once you're done, where you're at mid-workout,
+// protein when it's slipping late in the day, the morning weigh-in, or what today holds.
+function wrapHighlight(w) {
+  const ex = w.exercises.filter(e => doneSets(e).length);
+  const prs = ex.filter(e => {
+    const h = liftHist(e.key, w), best = Math.max(0, ...h.map(p => p.e1)), heavy = Math.max(0, ...h.flatMap(p => p.sets.map(x => +x.w || 0)));
+    return h.length >= 3 && best && (bestE1(doneSets(e)) > best * 1.03 || (heavy && Math.max(...doneSets(e).map(x => +x.w || 0)) > heavy));
+  });
+  if (prs.length) return prs.length === 1 ? `New best on ${prs[0].name}. 🎉` : `${prs.length} new bests today. 🎉`;
+  const lv = ex.map(e => ({ e, lv: longView(e, w, liftHist(e.key, w)) })).filter(x => x.lv && x.lv.k !== 'month' && lvFresh(x.e.key, x.lv, w.date)).sort((a, b) => b.lv.pct - a.lv.pct)[0];
+  if (lv && (coachMem()[lv.e.key] || {}).date !== w.date) lvRemember(lv.e.key, lv.lv, w.date);
+  if (lv) return lv.lv.k === 'year' ? `${lv.e.name} is up ${lv.lv.pct}% on last year. 📈` : `${lv.e.name} is up ${lv.lv.pct}% since you started it. 📈`;
+  const prevW = sortedW().find(o => o.id !== w.id && o.dayKey === w.dayKey && o.date < w.date && (o.exercises || []).some(e => doneSets(e).length));
+  const vol = x => sum((x.exercises || []).flatMap(e => doneSets(e).map(s => (+s.w || 0) * (+s.r || 0))));
+  if (prevW && daysBetween(prevW.date, w.date) <= 14 && vol(prevW) && vol(w) >= vol(prevW) * 1.05) return `More total work than last ${DAY_NAMES[dayKeyOf(prevW.date)] || 'time'}.`;
+  return '';
+}
+function planPreview(w) {
+  const n = w.exercises.length, sets = sum(w.exercises.map(e => e.sets.length));
+  const mins = Math.round(sets * (S.settings.restSec + 50) / 60 / 5) * 5;
+  const up = w.exercises.find(e => e.coach && e.coach.kind === 'up' && e.coach.w), back = w.exercises.find(e => e.coach && e.coach.kind === 'down');
+  const focus = up ? `${up.name} goes up to ${fmtW(up.coach.w)} lb.` : back ? `Easing back in on ${back.name}.` : 'Same weights, chasing reps.';
+  return `${n} ${n === 1 ? 'lift' : 'lifts'}, about ${mins} min. ${focus}`;
+}
+function dayCoach(date, w) {
+  if (date !== todayStr()) return null;
+  const h = hourNow(), b = bodyEntry(date), strength = w.type === 'strength' && w.exercises.length;
+  const total = strength ? sum(w.exercises.map(e => e.sets.length)) : 0, done = strength ? sum(w.exercises.map(e => e.sets.filter(s => s.done).length)) : 0;
+  const acts = (w.activities || []).filter(actDone).length, pc = proteinCoach(date);
+  const pTail = pc && pc.left > 0 && h >= 11 && h < 22 ? ` Protein next: ${pc.left} g to go.` : '';
+  if (strength && done && done >= total) {
+    const hi = wrapHighlight(w);
+    return { t: `That's a wrap ✓ ${done} sets in ${liftMinutes(w)} min.${hi ? ` ${hi}` : ''}${pTail}`, tone: 'good' };
+  }
+  if (!strength && w.type !== 'rest' && acts) return { t: `Done for today ✓${pTail}`, tone: 'good' };
+  if (strength && done) {
+    const mins = Math.max(5, Math.round((total - done) * (S.settings.restSec + 50) / 60 / 5) * 5);
+    return { t: `${done} of ${total} sets. About ${mins} min to go.`, tone: '' };
+  }
+  if (pc && pc.urgent) return { ...pc, src: 'protein' };
+  if (w.type === 'rest' && !acts) return { t: dayPick(['Rest day. This is when the muscle actually gets built.', 'Rest day. Recover, eat your protein, sleep well.', 'Rest day. A walk is a nice bonus, nothing more needed.'], 'rest'), tone: '', why: WHY.rest_day };
+  if (h < 11 && b.weight == null && !b.protein) return { t: `Morning! Weigh in before breakfast${strength ? ', then lift later' : ''}.`, tone: '', why: WHY.weigh, btn: { a: 'go-body', label: 'Weigh in' } };
+  if (h >= 21 && strength) return { t: 'Late one. A short session still counts, or rest up and go tomorrow.', tone: '', btn: w.exercises.length > 3 && !w.short ? { a: 'short-version', wid: w.id, label: '20-min version' } : null };
+  if (h >= 18 && strength && w.exercises.length > 3 && !w.short) return { t: 'Still time today. Tight on time? The 20-min version works.', tone: '', btn: { a: 'short-version', wid: w.id, label: '20-min version' } };
+  if (strength && lowDay(date)) return { t: 'Low day, lighter plan. Showing up is the win today.', tone: '' };
+  if (strength) return { t: planPreview(w), tone: '' };
+  return null;
+}
+function dayCoachHTML(dc) {
+  if (!dc) return '';
+  const txt = dc.why ? `<button class="dc-txt" data-a="coach-why" data-k="${dc.src || 'day'}">${nb(dc.t)}&nbsp;<i>ⓘ</i></button>` : `<span class="dc-txt">${nb(dc.t)}</span>`;
+  const btn = dc.btn ? `<button class="dc-btn" data-a="${dc.btn.a}"${dc.btn.wid ? ` data-wid="${dc.btn.wid}"` : ''}>${esc(dc.btn.label)}</button>`
+    : dc.food ? `<button class="dc-btn" data-a="food-quick" data-n="${esc(dc.food.name)}">+ ${esc(dc.food.name || 'Protein')} · ${dc.food.g} g</button>` : '';
+  return `<div class="daycoach ${dc.tone || ''}">${txt}${btn}</div>`;
+}
+// Lines that depend on the clock, so the screen can refresh when one changes.
+function liveSig() {
+  if (S.tab === 'body') return S.bodyDate === todayStr() ? (proteinCoach(todayStr()) || {}).t || '' : '';
+  if (S.tab !== 'today' || S.dayView) return '';
+  const w = todaySession();
+  // Mid-workout, leave the screen alone.
+  if (Date.now() - lastSetAt(w) < 20 * 60000) return 'busy';
+  return `${(dayCoach(todayStr(), w) || {}).t || ''}|${(proteinCoach(todayStr()) || {}).t || ''}`;
 }
 
 // ---------- rest timer ----------
@@ -1100,9 +1460,9 @@ const SLEEP = [[5, '≤5'], [6, '6'], [7, '7'], [8, '8'], [9, '9+']];
 const sleepPick = v => (v == null ? null : SLEEP.reduce((a, b) => (Math.abs(b[0] - v) < Math.abs(a[0] - v) ? b : a)));
 const fmtK = n => (n >= 1000 ? `${round1(n / 1000)}k` : String(n));
 const ENERGY_HINT = {
-  low: 'Taking it easier today: 2 sets a lift with no weight jumps, gentler yoga, and a walk instead of a run.',
+  low: 'Easy day: 2 sets a lift, no jumps, gentler cardio.',
   ok: 'Normal plan today.',
-  great: 'Feeling good: yoga and cardio picks lean a little harder today.',
+  great: 'Feeling good. Cardio and yoga lean a bit harder.',
 };
 // ----- notes the coach reads -----
 // Notes are split into clauses (sentences, lines, and "but"), and each clause is checked for what it's
@@ -1251,22 +1611,23 @@ function noteLabel(x) {
 // What a tag does, in plain words, with when it applies.
 function noteInfo(x, date) {
   const until = n => fmtDate(addDays(date, n), { weekday: 'short', month: 'short', day: 'numeric' });
-  const live = n => (addDays(date, n) >= todayStr() ? `On through ${until(n)}.` : 'That was a while ago, so it’s done now.');
+  const live = n => (addDays(date, n) >= todayStr() ? `On through ${until(n)}.` : 'That one’s done now.');
   const L = x.about, q = x.quote ? `From your note: “${x.quote}”` : '';
+  const G = MUSCLE_GROUP_NAME[x.about];
   switch (x.k) {
-    case 'lift-easy': return { title: `${L} felt easy`, body: [`Next time you do ${L}, the coach treats it like you had reps to spare. Hit the top of your range on every set and the weight goes up two steps instead of one. Short of that, it aims for two more reps a set instead of one.`, `This lasts until you do ${L} again. After that, your next note for it (or none) takes over.`], q };
-    case 'lift-hard': return { title: `${L} felt hard`, body: [`Next time you do ${L}, the weight won’t go up, even if you hit your reps. You’ll match last time and own it first.`, 'If it was a rough day overall (tired or sick), write that too and the session won’t count as a miss.'], q };
-    case 'lift-pain': return { title: `Pain on ${L}`, body: [`Next time you do ${L}, the weight stays the same, and the lift shows a reminder to keep it light and stop if it hurts.`, 'If it keeps happening, tap ⋯ on the lift and pick an answer under “Does it bother you?”. The coach then goes easier on it every time.', 'Sharp pain, or pain that lasts more than a few days, is worth getting checked.'], q };
-    case 'lift-cramp': return { title: `Cramp on ${L}`, body: [`Next time you do ${L}, it shows a reminder: go a bit lighter and slower, and sip water between sets.`], q };
-    case 'lift-note': return { title: `Note for ${L}`, body: [`This line shows on ${L} next time, right under “Last time”, so your own cue is there when it matters.`, 'Words like easy, hard, heavy, pain, or cramp in the same sentence also change the plan for it.'], q };
-    case 'sore-part': return { title: `Sore ${x.word}`, body: [`Lifting days through ${until(2)} offer to work around your ${MUSCLE_GROUP_NAME[x.about]}: one tap, and lifts for it sit out while other muscles fill in.`, 'Soreness also tips the yoga pick toward Flexibility for 3 days.', live(2)], q };
-    case 'pain-part': return { title: `${cap(x.word)} pain`, body: [`Lifting days through ${until(4)} offer to work around your ${MUSCLE_GROUP_NAME[x.about]}: one tap, and lifts for it sit out while other muscles fill in.`, 'It also tips the yoga pick toward Flexibility for 3 days.', 'Sharp pain, or pain that lasts more than a few days, is worth getting checked.', live(4)], q };
-    case 'sore': return { title: 'Soreness', body: ['For 3 days, the yoga pick leans toward Flexibility to help you loosen up.', 'Name the spot (like “sore chest”) and lifting days can work around it too.', live(3)], q };
-    case 'run-part': return { title: `${cap(x.word)} on your run`, body: [`If this is your latest run, your next run (within 2 weeks) stays at the same distance on flat ground, with no speed work. It also starts with a balance drill: stand on one leg, 3 × 30 seconds a side.`, 'A run with no note like this brings the normal plan back.'], q };
-    case 'cramp': return { title: 'Cramps', body: [`Workouts through ${until(2)} start with a reminder to drink water and have something salty an hour or so before.`, live(2)], q };
-    case 'sick': return { title: 'Sick', body: ['This workout won’t count as a miss, so the coach won’t lower your weights because of it.', `Through ${until(2)}, if you skip the energy check-in, the plan treats you as low energy: 2 sets a lift, no weight jumps, and a walk instead of a run. Check in as OK or Great to go back to normal sooner.`, live(2)], q };
-    case 'tired': return { title: 'Tired', body: ['This workout won’t count as a miss, so one rough day doesn’t drag your weights down. Next time, each lift builds on your last normal session instead.'], q };
-    case 'pace': return { title: `${cap(x.word)} run`, body: ['Heat, hills, wind, and trails slow you down for reasons that aren’t fitness, so this one doesn’t count toward the pace your run suggestions use. The distance still counts.'], q };
+    case 'lift-easy': return { title: `${L} felt easy`, body: [`Next time, hit the top of your range on every set and it jumps two steps instead of one. Otherwise, two more reps a set.`, `Lasts until you do ${L} again.`], q };
+    case 'lift-hard': return { title: `${L} felt hard`, body: [`Next time, ${L} stays at the same weight, even if you hit your reps. Own it first.`, 'Rough day overall? Write “tired” or “sick” too and it won’t count as a miss.'], q };
+    case 'lift-pain': return { title: `Pain on ${L}`, body: [`Next time, ${L} stays at the same weight with a reminder to keep it light.`, 'Keeps happening? Tap ⋯ on the lift, then “Does it bother you?”, and I’ll go easier on it every time.', 'Sharp pain, or pain that sticks around a few days, is worth getting checked.'], q };
+    case 'lift-cramp': return { title: `Cramp on ${L}`, body: [`Next time, ${L} gets a reminder: a bit lighter and slower, sip water between sets.`], q };
+    case 'lift-note': return { title: `Note for ${L}`, body: [`This shows on ${L} next time, right under “Last time”.`, 'Easy, hard, heavy, pain, or cramp in the same sentence also change the plan.'], q };
+    case 'sore-part': return { title: `Sore ${x.word}`, body: [`Through ${until(2)}, lifting days offer to work around your ${G}. One tap and other muscles fill in.`, 'Yoga leans toward Flexibility for 3 days too.', live(2)], q };
+    case 'pain-part': return { title: `${cap(x.word)} pain`, body: [`Through ${until(4)}, lifting days offer to work around your ${G}.`, 'Yoga leans toward Flexibility for 3 days.', 'Sharp or lasting pain is worth getting checked.', live(4)], q };
+    case 'sore': return { title: 'Soreness', body: ['Yoga leans toward Flexibility for 3 days.', 'Name the spot (“sore chest”) and lifting days can work around it too.', live(3)], q };
+    case 'run-part': return { title: `${cap(x.word)} on your run`, body: ['Your next run stays the same distance on flat ground, no speed work, with a quick balance drill first (one leg, 3 × 30 sec a side).', 'A run without a note like this brings the normal plan back.'], q };
+    case 'cramp': return { title: 'Cramps', body: [`Through ${until(2)}, workouts start with a reminder: water and something salty an hour before.`, live(2)], q };
+    case 'sick': return { title: 'Sick', body: ['Won’t count as a miss, so your weights don’t drop because of it.', `Through ${until(2)}, skipping the check-in means an easy plan: 2 sets a lift, no jumps, a walk instead of a run. Check in OK or Great to go back to normal.`, live(2)], q };
+    case 'tired': return { title: 'Tired', body: ['Won’t count as a miss. Next time, each lift builds on your last normal session.'], q };
+    case 'pace': return { title: `${cap(x.word)} run`, body: ['Heat, hills, wind, and trails slow you down for reasons that aren’t fitness, so this run stays out of your pace targets. Distance still counts.'], q };
   }
   return { title: noteLabel(x), body: [], q };
 }
@@ -1410,16 +1771,16 @@ function recommendYoga(date) {
     let score = Math.min(gap ?? 10, 14);
     const why = [];
     if (c.id === 'flex30') {
-      if (sore) { score += 5; why.push('Your recent notes mention soreness or tightness, so stretching will help.'); }
-      if (legs) { score += 3; why.push(legs === 'lifting' ? 'Yesterday worked your legs hard, so this helps them recover.' : `Yesterday's ${legs} worked your legs, so this helps them recover.`); }
-      if (y.upper) { score += 3; why.push(`Yesterday's ${y.upper} worked your back, shoulders, and grip, so a stretch helps.`); }
+      if (sore) { score += 5; why.push('Your notes mention soreness, so stretching helps.'); }
+      if (legs) { score += 3; why.push(legs === 'lifting' ? 'Legs worked hard yesterday, so this helps them recover.' : `Yesterday's ${legs} hit your legs, so this helps.`); }
+      if (y.upper) { score += 3; why.push(`Yesterday's ${y.upper} worked your back and grip, so a stretch helps.`); }
       if (y.hard) score += 2;
-      if (energy === 'low') { score += 6; why.push(sleepShort(date) ? 'Low energy and under 6 hours of sleep, so keep it gentle.' : 'Energy is low today, so keep it gentle.'); }
-      if (sleepShort(date)) { score += 3; why.push('You slept under 6 hours, so keep it gentle.'); }
+      if (energy === 'low') { score += 6; why.push(sleepShort(date) ? 'Low energy and short sleep, so gentle.' : 'Low energy, so gentle.'); }
+      if (sleepShort(date)) { score += 3; why.push('Under 6 hrs of sleep, so gentle.'); }
     }
     if (c.id === 'strength30') {
       if (energy === 'low') score -= 5;
-      if (energy === 'great') { score += 3; why.push("You've got energy today, so build some strength."); }
+      if (energy === 'great') { score += 3; why.push('Got energy today, so build some strength.'); }
       if (tomorrowLift) score -= 2;
       if (legs) score -= 2;
       if (y.hard) score -= 4;
@@ -1430,17 +1791,17 @@ function recommendYoga(date) {
       if (y.hard) score -= 6;
       if (sleepShort(date)) score -= 4;
       if (did60) score -= 7;
-      else if (energy === 'great') { score += 5; why.push("You haven't done the full hour this week, and you're feeling good."); }
+      else if (energy === 'great') { score += 5; why.push("No full hour yet this week, and you're feeling good."); }
     }
     if (c.id === 'combo30') score += 1;
     if (last && last.feel === 'hard') score -= 2;
     if (last && last.feel === 'easy') score += 1;
-    if (gap == null) why.push("You haven't logged this one yet.");
-    else if (gap >= 7) why.push(`It's been ${gap} days since you did this one.`);
+    if (gap == null) why.push("Haven't logged this one yet.");
+    else if (gap >= 7) why.push(`${gap} days since this one.`);
     return { c, score, why };
   }).sort((a, b) => b.score - a.score);
   const pick = scored[0];
-  if (!pick.why.length || (pick.c.id === 'combo30' && pick.why.length < 2)) pick.why.unshift('A balanced class that covers a bit of everything.');
+  if (!pick.why.length || (pick.c.id === 'combo30' && pick.why.length < 2)) pick.why.unshift('Balanced class, a bit of everything.');
   return { pick: pick.c, why: pick.why.slice(0, 2), others: scored.slice(1).map(x => x.c) };
 }
 // Ready for intermediate after enough sessions at your level, once most recent ones feel easy.
@@ -1478,21 +1839,21 @@ function recommendCardio(date, dayKey) {
   const hardYesterday = dayLoad(addDays(date, -1)).hard, tiredSleep = sleepShort(date);
   const runs = cardioHistory('run', date).filter(r => r.date >= addDays(date, -42));
   const walks = cardioHistory('walk', date);
-  const talk = 'You should be able to talk in full sentences.';
+  const talk = 'Easy enough to chat.';
   const sick = !energy && sickNoted(date);
   if (energy === 'low' || sick) {
     const m = walks.length ? Math.round(sum(walks.slice(0, 5).map(x => x.min)) / Math.min(5, walks.length)) : 20;
-    return { type: 'walk', text: `Easy walk, about ${m} min`, why: sick ? `You noted being sick ${sick.date === addDays(date, -1) ? 'yesterday' : 'recently'}, so an easy walk keeps you moving without pushing it. It still counts for your streak.` : 'Energy is low, so a walk keeps you moving and still counts for your streak.' };
+    return { type: 'walk', text: `Easy walk, about ${m} min`, why: sick ? `Sick ${sick.date === addDays(date, -1) ? 'yesterday' : 'recently'}, so an easy walk. Keeps you moving, still counts.` : 'Low energy, so a walk. Still counts for your streak.' };
   }
   if (!runs.length) {
     // Back after a break from running: half your usual distance, easy, then build.
     const older = cardioHistory('run', date).filter(r => !r.intervals && !r.skip).slice(0, 5);
     if (older.length) {
       const d = round1(Math.max(1, sum(older.map(r => r.dist)) / older.length / 2)), p = sum(older.map(r => r.pace)) / older.length + 0.5;
-      return { type: 'run', dist: d, pace: p, text: `Easy run: ${d} mi at about ${fmtPace(p)} /mi`, why: `Back to running after ${Math.round(daysBetween(older[0].date, date) / 7)} weeks, so start with about half your usual distance. Add up to 10% each run from here. ${talk}` };
+      return { type: 'run', dist: d, pace: p, text: `Easy run: ${d} mi at about ${fmtPace(p)} /mi`, why: `First run in ${Math.round(daysBetween(older[0].date, date) / 7)} weeks, so about half your usual. Add up to 10% a run from here. ${talk}` };
     }
-    if (walks.length >= 3) return { type: 'run', text: 'Run/walk for 20 min: jog 1 minute, walk 90 seconds, 8 times', why: "You've been walking steadily, so you're ready to mix in some jogging. As it gets easier, make the jogs longer." };
-    return { type: 'walk', text: 'Walk 20 to 30 min at a comfortable pace', why: 'Log the distance and time, and future suggestions build from what you do.' };
+    if (walks.length >= 3) return { type: 'run', text: 'Run/walk for 20 min: jog 1 minute, walk 90 seconds, 8 times', why: "You've been walking steadily, so mix in some jogging. Stretch the jogs as it gets easier." };
+    return { type: 'walk', text: 'Walk 20 to 30 min at a comfortable pace', why: 'Log distance and time, and suggestions build from there.' };
   }
   const steady = runs.filter(r => !r.intervals && !r.skip), recent = (steady.length ? steady : runs.filter(r => !r.skip).length ? runs.filter(r => !r.skip) : runs).slice(0, 5);
   const avg = sum(recent.map(r => r.pace)) / recent.length;
@@ -1500,24 +1861,24 @@ function recommendCardio(date, dayKey) {
   const sorePart = runs[0].date >= addDays(date, -14) && runs[0].part;
   if (sorePart) {
     const d = round1(runs[0].dist);
-    return { type: 'run', dist: d, pace: avg + 0.5, text: `Same distance as last time: ${d} mi on flat ground`, why: `You noted your ${sorePart.toLowerCase()} last run, so no step up today and no speed work. Before you go: balance on one leg, 3 × 30 seconds a side. Stop if it hurts.` };
+    return { type: 'run', dist: d, pace: avg + 0.5, text: `Same distance as last time: ${d} mi on flat ground`, why: `You mentioned your ${sorePart.toLowerCase()} last run, so no step up and no speed work. Balance on one leg first, 3 × 30 sec a side. Stop if it hurts.` };
   }
   if (easyDay || hardYesterday || tiredSleep) {
     // About three quarters of your usual distance, so an easy day after a long run stays easy.
     const d = round1(Math.min(runs[0].dist, Math.max(1, 0.75 * sum(recent.map(r => r.dist)) / recent.length))), p = avg + 0.75;
-    const why = hardYesterday ? `Yesterday's ${hardYesterday} was a big one, so keep today easy.` : tiredSleep ? 'You slept under 6 hours, so keep today easy.' : 'An easy day keeps your legs fresh for lifting.';
-    return { type: 'run', dist: d, pace: p, text: `Easy run: ${d} mi at about ${fmtPace(p)} /mi`, why: `${why} That's about 45 seconds per mile slower than your recent ${fmtPace(avg)}. ${talk}` };
+    const why = hardYesterday ? `Yesterday's ${hardYesterday} was a big one, so easy today.` : tiredSleep ? 'Under 6 hrs of sleep, so easy today.' : 'An easy day keeps your legs fresh for lifting.';
+    return { type: 'run', dist: d, pace: p, text: `Easy run: ${d} mi at about ${fmtPace(p)} /mi`, why: `${why} About 45 sec/mi slower than your recent ${fmtPace(avg)}. ${talk}` };
   }
   const longest = Math.max(...runs.filter(r => r.date >= addDays(date, -30)).map(r => r.dist), runs[0].dist);
   // Base built (3+ miles): every other regular run day becomes intervals, for conditioning.
   const lastRegular = runs.find(r => !r.easyDay);
   if (longest >= 3 && lastRegular && !lastRegular.intervals) {
     return { type: 'run', intervals: true, text: 'Intervals: 6 × 1 min fast',
-      why: `10 min easy, then 6 rounds of 1 min fast and 2 min easy jog, then 10 min easy. Fast means hard but steady, about 8 out of 10. Your base is built (${round1(longest)} mi this month), so every other run day mixes in speed.` };
+      why: `10 min easy, then 6 × (1 min fast, 2 min easy jog), then 10 min easy. Fast = hard but steady, about 8 out of 10. Your base is built (${round1(longest)} mi this month), so every other run gets some speed.` };
   }
   const d = round1(Math.min(longest * 1.1, longest + 0.5));
-  const why = energy === 'great' ? "You're feeling good, so push the pace if you like, but keep the distance step small." : 'Keeping each run within about 10% of your longest this month lowers injury risk.';
-  return { type: 'run', dist: d, pace: avg, text: `Run ${d} mi at about ${fmtPace(avg)} /mi`, why: `A small step up from your longest run this month (${round1(longest)} mi). ${why}` };
+  const why = energy === 'great' ? 'Feeling good? Push the pace, keep the distance step small.' : 'Staying within about 10% of your longest keeps injury risk down.';
+  return { type: 'run', dist: d, pace: avg, text: `Run ${d} mi at about ${fmtPace(avg)} /mi`, why: `A small step up from your longest this month (${round1(longest)} mi). ${why}` };
 }
 function cardioRecords(before, excludeId) {
   const rec = { longRun: null, fastRun: null, longWalk: null, longHike: null };
@@ -1565,16 +1926,17 @@ function setEnergy(v) {
 }
 
 function todaySummary(date, w) {
-  const b = bodyEntry(date), target = proteinTargetFor(date), en = energyFor(date);
+  const b = bodyEntry(date), target = proteinTargetFor(date), en = energyFor(date), pc = proteinCoach(date);
   let status;
   const acts = (w.activities || []).filter(actDone).length;
   if (w.type === 'strength' && w.exercises.length) status = `${sum(w.exercises.map(e => e.sets.filter(x => x.done).length))}/${sum(w.exercises.map(e => e.sets.length))}`;
   else if (acts) status = 'Done';
   else status = w.type === 'rest' ? 'Rest' : 'Not yet';
   return `<div class="card today-card">
+    ${dayCoachHTML(dayCoach(date, w))}
     <div class="day-strip">
       <button class="${b.weight != null ? 'ok' : ''}" data-a="go-body"><span>Weigh-in</span><b>${b.weight != null ? b.weight : 'Not yet'}</b></button>
-      <button class="${b.protein >= 0.9 * target ? 'ok' : ''}" data-a="go-body" data-f="food-name"><span>Protein</span><b>${b.protein}/${target}</b></button>
+      <button class="${b.protein >= 0.9 * target ? 'ok' : pc && pc.behind ? 'behind' : ''}" data-a="go-body" data-f="food-name"><span>Protein</span><b>${b.protein}/${target}</b></button>
       <button class="${hasWork(w) ? 'ok' : ''}" data-a="scroll-work"><span>${w.type === 'strength' && w.exercises.length ? 'Sets' : w.type === 'rest' ? 'Today' : 'Workout'}</span><b>${status}</b></button>
     </div>
     ${en && sleepFor(date) != null && !S.checkinOpen ? `<button class="checkin-sum" data-a="checkin-open"><span>Energy <b>${ENERGY[en]}</b> · Sleep <b>${sleepPick(sleepFor(date))[1]} hrs</b></span><span class="linkbtn">Change</span></button>` : `
@@ -1584,7 +1946,7 @@ function todaySummary(date, w) {
     <div class="energy"><span>Sleep hrs</span>
       <div class="seg">${SLEEP.map(([v, n]) => `<button class="${(sleepPick(sleepFor(date)) || [])[0] === v ? 'on' : ''}" data-a="sleep" data-v="${v}">${n}</button>`).join('')}</div>
     </div>`}
-    <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How do you feel, and how did you sleep? Your plan adjusts to both.'}${twoShortNights(date) ? ' Two short nights in a row: 2 sets a lift and no weight jumps today.' : sleepShort(date) ? ' Under 6 hours of sleep: no weight jumps and easier cardio today.' : ''}</div>
+    <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How are you feeling? The plan adjusts.'}${twoShortNights(date) ? ' Two short nights: 2 sets a lift, no jumps.' : sleepShort(date) ? ' Under 6 hrs of sleep: no jumps, easier cardio.' : ''}</div>
   </div>`;
 }
 
@@ -1594,10 +1956,10 @@ function comebackCard(w) {
   const last = S.workouts.filter(x => x.date < w.date && (x.exercises || []).some(e => doneSets(e).length)).map(x => x.date).sort().pop();
   const gap = last ? daysBetween(last, w.date) : 0;
   if (gap < 7) return '';
-  const short = w.exercises.length > 3 && !w.short ? `<button class="btn block" style="margin-top:12px" data-a="short-version" data-wid="${w.id}">Short on time? Do a 20-minute version</button>` : '';
+  const short = w.exercises.length > 3 && !w.short ? `<button class="btn block" style="margin-top:12px" data-a="short-version" data-wid="${w.id}">Short on time? 20-minute version</button>` : '';
   return `<div class="card tip"><b>Welcome back!</b> ${gap >= 21
-    ? `It's been ${gap} days since you lifted, so today's weights start lighter and climb back each session. Your old numbers return faster than they took to build.`
-    : `It's been ${gap} days since you lifted. Even a short session keeps your strength.`}${short}</div>`;
+    ? `${gap} days off, so weights start lighter and climb back each session. It comes back faster than it took to build.`
+    : `${gap} days off. Even a short session keeps your strength.`}${short}</div>`;
 }
 
 function welcomeCard() {
@@ -1608,7 +1970,7 @@ function welcomeCard() {
 function backupNudge() {
   const lb = S.settings.lastBackup, n = S.workouts.filter(hasWork).length;
   if (n < 5 || (lb && Date.now() - lb < 14 * 864e5)) return '';
-  return `<div class="card tip"><b>Back up your log.</b> It lives only on this phone. ${lb ? 'Your last backup was over 2 weeks ago.' : 'You haven\'t saved a backup yet.'}
+  return `<div class="card tip"><b>Back up your log.</b> It only lives on this phone. ${lb ? 'Last backup was 2+ weeks ago.' : 'No backup yet.'}
     <div class="btn-row" style="margin-top:10px"><button class="btn pri" data-a="export">Save a backup</button></div></div>`;
 }
 
@@ -1702,7 +2064,7 @@ function viewDay(date) {
 }
 function previewDay(k, date) {
   const plan = S.program.days[k];
-  if (plan.type === 'rest') return '<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Nothing planned. Recover, eat your protein, and sleep well.</div></div>';
+  if (plan.type === 'rest') return '<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Nothing planned. Recover, eat, sleep.</div></div>';
   if (plan.type === 'cardio') {
     const rec = recommendCardio(date, k);
     return `<div class="card"><div class="lbl">The plan</div><b>${esc(rec.text)}</b><div class="muted small">${esc(rec.why || '')}</div></div>`;
@@ -1710,7 +2072,7 @@ function previewDay(k, date) {
   const w = buildSession(k, date);
   return `<div class="card plan-card"><div class="lbl">The plan</div>
     ${w.exercises.map(e => `<div class="row"><div>${esc(e.name)}<div class="muted small">${esc(targetText(e.target))}</div></div>${e.sets[0] && +e.sets[0].w ? `<small>${fmtW(e.sets[0].w)} lb</small>` : ''}</div>`).join('')}
-    ${w.exercises.some(e => e.sets[0] && +e.sets[0].w) ? '<div class="sh-hint">Weights are a starting guess. They update from what you lift before then.</div>' : ''}</div>`;
+    ${w.exercises.some(e => e.sets[0] && +e.sets[0].w) ? '<div class="sh-hint">Weights are a guess for now. They update as you lift.</div>' : ''}</div>`;
 }
 
 function sessionStrength(w) {
@@ -1735,9 +2097,9 @@ function sessionStrength(w) {
   const free = w.dayKey === 'free';
   return `${free ? `<div class="card"><label class="lbl" for="wname-${w.id}">Workout name</label>
       <input class="inp" id="wname-${w.id}" data-wid="${w.id}" data-wb="label" value="${esc(w.label)}" placeholder="e.g. Hotel gym"></div>` : ''}
-    ${w.exercises.length && !S.workouts.some(x => (x.exercises || []).some(e => doneSets(e).length)) ? '<div class="sh-hint tap-hint">Tap a set to change its weight or reps, then ✓ when it\'s done. Everything saves as you go.</div>' : ''}
+    ${w.exercises.length && !S.workouts.some(x => (x.exercises || []).some(e => doneSets(e).length)) ? '<div class="sh-hint tap-hint">Tap a set to change it, then ✓ when it\'s done. Saves as you go.</div>' : ''}
     ${w.date === todayStr() && !deloadState(w.date).active && !hasWork(w) ? deloadCard(w.date) : ''}
-    ${!isLive(w) && w.exercises.some(e => e.sets.some(x => !x.done && x.w !== '' && x.r !== '')) ? `<button class="btn pri block" data-a="log-all" data-wid="${w.id}">${ic('check')} Log all sets as shown</button><div class="sh-hint" style="margin-bottom:10px">Or tick just the sets you did. Only ticked sets count.</div>` : ''}
+    ${!isLive(w) && w.exercises.some(e => e.sets.some(x => !x.done && x.w !== '' && x.r !== '')) ? `<button class="btn pri block" data-a="log-all" data-wid="${w.id}">${ic('check')} Log all sets as shown</button><div class="sh-hint" style="margin-bottom:10px">Or tick just the ones you did. Only ticked sets count.</div>` : ''}
     ${cards || '<div class="card empty"><b>No exercises yet</b>Add your first one below.</div>'}
     <div class="btn-row add-pair">
       <button class="btn" data-a="sx-add" data-wid="${w.id}">+ Exercise</button>
@@ -1755,7 +2117,7 @@ function exBlock(w, i, letter) {
   if (isFolded(w, i)) {
     return `<button class="ex ex-fold" data-a="ex-unfold" data-wid="${w.id}" data-ex="${i}">
       <span class="ex-name">${letter ? `<span class="ss-letter">${letter}</span>` : ''}${esc(e.name)}</span>
-      <span class="fold-sum">${ic('check')} ${e.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</span></button>`;
+      <span class="fold-sum">${ic('check')} ${e.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</span>${sayHTML(w, i, true)}</button>`;
   }
   const last = lastPerf(e.key, w);
   const c = isLive(w) ? e.coach : null;
@@ -1794,6 +2156,7 @@ function exBlock(w, i, letter) {
     ${banner}
     ${warmupFor(w, i) ? `<div class="warmup">${esc(warmupFor(w, i))}</div>` : ''}
     <div class="sets">${rows}</div>
+    ${sayHTML(w, i)}
     ${rirAsk(w, i)}
     <div class="ex-tools">
       <button data-a="add-set" data-wid="${w.id}" data-ex="${i}">+ Set</button>
@@ -1814,7 +2177,7 @@ function rirAsk(w, i) {
   const e = w.exercises[i], j = e.sets.length - 1, s = e.sets[j];
   if (S.settings.askRir === false || w.date !== todayStr() || !e.sets.every(x => x.done) || targetOf(e).unit === 'steps') return '';
   return `<div class="rir">
-      <span>Last set: how many more reps could you have done?</span>
+      <span>That last set: how many more could you have done?</span>
       <div class="seg">${[[0, '0'], [1, '1'], [2, '2'], [3, '3+']].map(([v, n]) => `<button class="${s.rir === v ? 'on' : ''}" data-a="rir" data-wid="${w.id}" data-ex="${i}" data-s="${j}" data-v="${v}">${n}</button>`).join('')}</div>
     </div>`;
 }
@@ -1824,7 +2187,7 @@ function notesCard(w) {
     <label class="lbl" for="notes-${w.id}">Workout notes</label>
     <textarea class="inp" id="notes-${w.id}" data-wid="${w.id}" data-wb="notes" placeholder="Pain, form cues, energy, how it felt…">${esc(w.notes)}</textarea>
     ${noteTagsFor(w, 'w')}
-    ${fieldSigs(w, 'w').length ? '' : `<div class="sh-hint">Try “bench felt easy”, “sore chest”, “knee hurt”, or “tired today”. Words the coach acts on show as tags, and you can tap one to see what it changes.</div>`}
+    ${fieldSigs(w, 'w').length ? '' : `<div class="sh-hint">Try “bench felt easy” or “sore chest”. Words I act on turn into tags. Tap one to see what it does.</div>`}
   </div>`;
 }
 
@@ -1846,7 +2209,7 @@ function sessionRest(w) {
   const acts = (w.activities || []).length;
   const kcal = acts ? workoutKcal(w) : null;
   const isToday = w.date === todayStr();
-  return `${acts || !isToday ? '' : `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Recover, eat your protein, and sleep well. Missed a session this week? Pick its day above to do it today.</div></div>`}
+  return `${acts || !isToday ? '' : `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Recover, eat your protein, sleep well. Missed a session? Tap its day above.</div></div>`}
     ${actCards(w)}
     <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Activity</button>
     ${acts ? `${notesCard(w)}
@@ -2094,6 +2457,7 @@ function bodyEntry(date) {
 function saveBody(b) {
   delete b.adds;
   b.protein = sum(b.items.map(x => +x.g || 0));
+  if (b.date >= todayStr() || !b.target) b.target = liveTarget(b.date);
   S.body[b.date] = b;
   DB.put('body', b).catch(saveFailed);
 }
@@ -2125,14 +2489,20 @@ function weightTrend(date) {
 }
 function goalNote(t) {
   const g = GOALS[S.settings.goal] || GOALS.maintain, k = S.settings.goal;
-  if (!t || t.pct == null) return `Goal: ${g.name}, ${g.aim}. ${Object.values(S.body).filter(b => b.weight != null).length >= 10 ? 'Weigh in a few more mornings this month and the trend shows here.' : 'Weigh in most mornings and the trend shows after two weeks.'}`;
-  if (t.pct > g.hi) return k === 'cut' ? 'Losing slower than planned. Eat about 200 fewer calories a day, or walk a bit more.'
-    : k === 'bulk' ? 'Gaining faster than planned, so more of it may be fat. Eat about 200 fewer calories a day.' : 'Creeping up. Eat about 200 fewer calories a day.';
-  if (t.pct < g.lo) return k === 'cut' ? 'Losing fast, which can cost muscle. Eat about 200 more calories a day.'
-    : k === 'bulk' ? 'Not gaining yet. Add about 200 calories a day, like a glass of milk or a handful of nuts.' : 'Drifting down. Add about 200 calories a day.';
-  return `On track for your ${g.name.toLowerCase()} goal.`;
+  if (!t || t.pct == null) return `Goal: ${g.name}, ${g.aim}. ${Object.values(S.body).filter(b => b.weight != null).length >= 10 ? 'A few more morning weigh-ins and the trend shows here.' : 'Weigh in most mornings and the trend shows up in two weeks.'}`;
+  if (t.pct > g.hi) return k === 'cut' ? 'Losing slower than planned. About 200 fewer calories a day, or walk a bit more.'
+    : k === 'bulk' ? 'Gaining fast, so some of it is likely fat. About 200 fewer calories a day.' : 'Creeping up. About 200 fewer calories a day.';
+  if (t.pct < g.lo) return k === 'cut' ? 'Losing fast, which can cost muscle. About 200 more calories a day.'
+    : k === 'bulk' ? 'Not gaining yet. Add about 200 calories a day, like a glass of milk.' : 'Drifting down. Add about 200 calories a day.';
+  return `On track for your ${g.name.toLowerCase()}. 👌`;
 }
+// Past days keep the target they had, so changing a setting never rewrites how a day went.
 function proteinTargetFor(date) {
+  const b = S.body[date];
+  if (b && b.target && date < todayStr()) return b.target;
+  return liveTarget(date);
+}
+function liveTarget(date) {
   if (S.settings.proteinMode === 'auto') {
     const b = latestWeighIn(date);
     if (b) return Math.round(proteinBasisLb(b.weight) * perLbFor());
@@ -2149,8 +2519,8 @@ function rememberFood(name, g) {
   f.name = name; f.g = g; f.used++; f.last = Date.now();
   saveFoods();
 }
-function addFood(name, g) {
-  const b = bodyEntry(S.bodyDate);
+function addFood(name, g, date = S.bodyDate) {
+  const b = bodyEntry(date);
   b.items = [...b.items, { name, g, at: Date.now() }];
   saveBody(b);
   if (name) rememberFood(name, g);
@@ -2167,9 +2537,9 @@ function viewBody() {
   const diff = (b.weight != null && prevW) ? Math.round((b.weight - prevW.weight) * 10) / 10 : null;
   const left = target - b.protein;
   const wi = latestWeighIn(date);
-  const why = S.settings.proteinMode !== 'auto' ? 'Fixed target. You can change it in More.'
+  const why = date < today && b.target ? `${b.target} g, what it was that day` : S.settings.proteinMode !== 'auto' ? 'Fixed target. Change it in More.'
     : wi ? `${perLbFor()} g × ${proteinBasisLb(wi.weight)} lb${proteinBasisLb(wi.weight) !== wi.weight ? ' (weight at a BMI of 25 for your height)' : ' bodyweight'}${wi.date !== date ? `, weighed ${esc(fmtDate(wi.date, { month: 'short', day: 'numeric' }))}` : ''}${S.settings.goal === 'cut' ? '. Higher on a cut to protect muscle' : ''}`
-    : 'Log your weight above and the target follows it.';
+    : 'Log your weight and the target follows it.';
   const trend = weightTrend(date);
   const wk7 = Array.from({ length: 7 }, (_, k) => addDays(date, k - 6));
   const creatineDays = wk7.filter(d => (S.body[d] || {}).creatine).length;
@@ -2209,7 +2579,7 @@ function viewBody() {
       <label class="lbl">Protein</label>
       <div class="big-num">${b.protein}<small> / ${target} g</small></div>
       <div class="prog ${b.protein >= target ? 'hit' : ''}"><div style="width:${pct}%"></div></div>
-      <div class="muted small" style="margin-top:-6px">${left > 0 ? `${left} g to go` : 'Target hit. Nice.'}</div>
+      ${date === today ? proteinSayHTML(proteinCoach(date)) : `<div class="muted small" style="margin-top:-6px">${left > 0 ? `${left} g short that day` : 'Target hit.'}</div>`}
       <div class="sh-hint">Target: ${why}</div>
     </div>
 
@@ -2225,7 +2595,7 @@ function viewBody() {
     </div>
 
     ${S.settings.creatine ? `<div class="card"><div class="rem-row">
-        <div><b>Creatine, 3 to 5 g</b><small>${creatineDays} of the last 7 days. Any time of day works; daily is what matters.</small></div>
+        <div><b>Creatine, 3 to 5 g</b><small>${creatineDays} of the last 7 days. Any time works, daily is what counts.</small></div>
         <button class="toggle ${b.creatine ? 'on' : ''}" data-a="creatine">${b.creatine ? 'Took it' : 'Not yet'}</button>
       </div></div>` : ''}
 
@@ -2808,7 +3178,7 @@ function renderSheet() {
 function infoSheetHTML() {
   const sh = S.sheet;
   return `<div class="sh-grip"></div>
-    <div class="sh-title">${esc(sh.title)}<span>What the coach does with it</span></div>
+    <div class="sh-title">${esc(sh.title)}<span>${esc(sh.sub || 'What the coach does with it')}</span></div>
     ${sh.q ? `<div class="ex-note" style="margin:0 0 12px">${esc(sh.q)}</div>` : ''}
     <div class="info-body">${sh.body.map(p => `<p>${esc(p)}</p>`).join('')}</div>
     <button class="btn block" data-a="sheet-close">Got it</button>`;
@@ -3372,8 +3742,8 @@ const ACT = {
     const w = getW(d.wid), e = w.exercises[+d.ex], c = e.coach;
     e.sets.forEach((s, k) => {
       if (s.done) return;
-      if (c.prev) s.w = c.prev[Math.min(k, c.prev.length - 1)];
-      else if (+s.w === c.w) s.w = c.from;
+      if (c.prev) s.w = s.pw = c.prev[Math.min(k, c.prev.length - 1)];
+      else if (+s.w === c.w) s.w = s.pw = c.from;
     });
     persist(w); render(); toast(c.prev && new Set(c.prev).size > 1 ? 'Keeping last time\'s weights' : `Keeping ${c.from} lb`);
   },
@@ -3425,6 +3795,10 @@ const ACT = {
   rir: d => {
     const w = getW(d.wid), e = w.exercises[+d.ex], s = e.sets[+d.s];
     s.rir = s.rir === +d.v ? null : +d.v;
+    if (s.rir != null && isLive(w)) {
+      const say = rirReaction(w, +d.ex), k = `${w.id}:${e.key}`, cur = S.say[k];
+      if (say && (!cur || (cur.score || 0) <= say.score || Date.now() - cur.at > 120000)) S.say[k] = { ...say, at: Date.now() };
+    }
     // The finished exercise folds up; keep the next one where your thumb is.
     const k = w.exercises.findIndex((x, n) => n > +d.ex && x.sets.some(y => !y.done));
     const sel = k >= 0 ? setSel(w, k, w.exercises[k].sets.findIndex(y => !y.done)) : null;
@@ -3580,9 +3954,12 @@ const ACT = {
     const name = $('#food-name').value.trim(), g = num($('#food-g').value);
     if (!g || g <= 0) { toast('Enter the grams of protein'); $('#food-g').focus(); return; }
     addFood(name, Math.round(g));
-    toast(name ? `Added ${name}` : `Added ${Math.round(g)} g`);
+    toast(proteinAddSay(Math.round(g), S.bodyDate));
   },
-  'food-quick': d => { const f = findFood(d.n); if (f) { addFood(f.name, f.g); toast(`Added ${f.name}`); } },
+  'food-quick': d => {
+    const f = findFood(d.n), date = S.tab === 'body' ? S.bodyDate : todayStr();
+    if (f) { addFood(f.name, f.g, date); toast(proteinAddSay(+f.g, date)); }
+  },
   'food-fav': d => { const f = findFood(d.n); if (f) { f.fav = !f.fav; saveFoods(); render(); } },
   'item-rm': d => {
     const b = bodyEntry(S.bodyDate), [it] = b.items.splice(+d.i, 1);
@@ -3618,6 +3995,18 @@ const ACT = {
     const w = getW(d.wid), at = Date.parse(`${w.date}T12:00`);
     w.exercises.forEach(e => e.sets.forEach((x, k) => { if (!x.done && x.w !== '' && x.r !== '') { x.done = true; x.at = at + k; } }));
     persist(w); render(); toast('Logged.');
+  },
+  'say-why': d => {
+    const x = S.say[d.k];
+    if (!x || !x.why) return;
+    S.sheet = { kind: 'info', title: x.why.title, body: x.why.body, q: '', sub: 'The short version' };
+    renderSheet();
+  },
+  'coach-why': d => {
+    const x = d.k === 'protein' ? proteinCoach(todayStr()) : dayCoach(todayStr(), todaySession());
+    if (!x || !x.why) return;
+    S.sheet = { kind: 'info', title: x.why.title, body: x.why.body, q: '', sub: 'The short version' };
+    renderSheet();
   },
   'note-tag': d => {
     const w = getW(d.wid), x = w && fieldSigs(w, d.src)[+d.i];
@@ -3732,6 +4121,8 @@ document.addEventListener('change', ev => {
     b.weight = num(el.value);
     saveBody(b);
     if (S.bodyDate === todayStr() && b.weight != null) reminderWeighed();
+    const ws = weighSay(b);
+    if (ws) setTimeout(() => toast(ws, 5200), 300);
     setTimeout(render, 250);
   } else if (el.dataset.wb && /^activities\./.test(el.dataset.wb)) {
     const w = getW(el.dataset.wid);
@@ -3780,7 +4171,8 @@ document.addEventListener('visibilitychange', () => {
     // A new day since you last looked: start from today everywhere.
     if (shownDay !== todayStr()) {
       if (S.bodyDate === shownDay || S.bodyDate > todayStr()) S.bodyDate = todayStr();
-      S.dayView = null; S.checkinOpen = false;
+      S.dayView = null; S.checkinOpen = false; S.say = {}; S.said = {};
+      freezeTargets();
       const sw = S.sheet && S.sheet.wid != null ? getW(S.sheet.wid) : null;
       if (S.sheet && S.sheet.wid != null && (!sw || !isLive(sw))) closeSheet();
       shownDay = todayStr();
@@ -3790,6 +4182,15 @@ document.addEventListener('visibilitychange', () => {
     if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {});
   }
 });
+
+let liveLast = '';
+setInterval(() => {
+  if (!S.program || document.visibilityState !== 'visible' || S.sheet || S.view || typing()) return;
+  const sig = liveSig();
+  if (sig === 'busy' || sig === liveLast) return;
+  if (liveLast) render();
+  liveLast = sig;
+}, 60000);
 
 // ---------- start ----------
 (async function start() {
