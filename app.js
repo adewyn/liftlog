@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.4.3';
+const APP_VERSION = '2.4.4';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -789,15 +789,16 @@ function keepInPlace(sel, fn) {
   const b = document.querySelector(sel);
   if (a && b) window.scrollBy(0, b.getBoundingClientRect().top - t);
 }
-// Make sure a set row sits between the header and the rest timer.
+// Make sure the next set row is in view: below the rest timer (top corner) and above the tab bar.
 function showAboveTimer(sel) {
   const el = document.querySelector(sel);
   if (!el) return;
   const r = el.closest('.set').getBoundingClientRect();
   const timer = $('#timer'), tabs = $('#tabs');
-  const floor = (timer && !timer.hidden ? timer.getBoundingClientRect().top : tabs ? tabs.getBoundingClientRect().top : innerHeight) - 12;
+  const floor = (tabs ? tabs.getBoundingClientRect().top : innerHeight) - 12;
+  const ceil = timer && !timer.hidden ? timer.getBoundingClientRect().bottom + 10 : 70;
   if (r.bottom > floor) window.scrollBy({ top: r.bottom - floor + 8, behavior: 'smooth' });
-  else if (r.top < 70) window.scrollBy({ top: r.top - 70, behavior: 'smooth' });
+  else if (r.top < ceil) window.scrollBy({ top: r.top - ceil, behavior: 'smooth' });
 }
 
 function logSet(w, i, j) {
@@ -3003,7 +3004,7 @@ function viewMore() {
         <div><b>Ask how hard it was</b><small>After the last set of each lift: could you have done one more rep? A no means it was all-out, so next time you match it before adding reps.</small></div>
         <button class="toggle ${S.settings.askRir !== false ? 'on' : ''}" data-a="ask-rir">${S.settings.askRir !== false ? 'On' : 'Off'}</button>
       </div>
-      <div class="sh-hint">Pops up in the corner after each set. Partway through a superset round it counts up instead. iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
+      <div class="sh-hint">Pops up in the top corner after each set. Partway through a superset round it counts up instead. iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
     </div>
 
     ${proteinCard()}

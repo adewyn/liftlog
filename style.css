@@ -784,3 +784,10 @@ h2::before { content: ""; width: 6px; height: 6px; border-radius: 2px; backgroun
 #timer .tm-skip { color: var(--mut); }
 body.has-timer { padding-bottom: calc(var(--tabh) + var(--safe-b) + 84px); }
 @media (prefers-reduced-motion: reduce) { #timer.pop .tm-pill { animation: none; } }
+
+/* timer at the top-right corner */
+#timer { top: calc(env(safe-area-inset-top, 0px) + 10px); bottom: auto; }
+@keyframes tm-pop { from { transform: scale(.6) translateY(-10px); opacity: 0; } }
+body.has-timer { padding-bottom: calc(var(--tabh) + var(--safe-b) + 24px); }
+body.has-timer #toast { top: calc(env(safe-area-inset-top, 0px) + 76px); }
+body.has-timer .streak-pill { visibility: hidden; }
