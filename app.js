@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.4.2';
+const APP_VERSION = '2.4.3';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -2189,13 +2189,14 @@ function isFolded(w, i) {
   const last = e.sets[e.sets.length - 1];
   return last.rir != null || S.settings.askRir === false || w.exercises.some((x, k) => k > i && x.group !== e.group && x.sets.some(s => s.done));
 }
-// After the last set of an exercise: how many more reps could you have done? Feeds next time's jump.
+// After the last set of a lift: could you have done one more rep? Yes is saved as 2 reps left, No as 0
+// (all-out), so older answers (0 to 3) still read the same way.
 function rirAsk(w, i) {
   const e = w.exercises[i], j = e.sets.length - 1, s = e.sets[j];
   if (S.settings.askRir === false || w.date !== todayStr() || !e.sets.every(x => x.done) || targetOf(e).unit === 'steps') return '';
   return `<div class="rir">
-      <span>That last set: how many more could you have done?</span>
-      <div class="seg">${[[0, '0'], [1, '1'], [2, '2'], [3, '3+']].map(([v, n]) => `<button class="${s.rir === v ? 'on' : ''}" data-a="rir" data-wid="${w.id}" data-ex="${i}" data-s="${j}" data-v="${v}">${n}</button>`).join('')}</div>
+      <span>That last set: could you have done one more rep?</span>
+      <div class="seg">${[[2, 'Yes'], [0, 'No']].map(([v, n]) => `<button class="${s.rir === v ? 'on' : ''}" data-a="rir" data-wid="${w.id}" data-ex="${i}" data-s="${j}" data-v="${v}">${n}</button>`).join('')}</div>
     </div>`;
 }
 
@@ -2999,10 +3000,10 @@ function viewMore() {
         <button class="toggle ${S.settings.smartRest ? 'on' : ''}" data-a="smart-rest">${S.settings.smartRest ? 'On' : 'Off'}</button>
       </div>
       <div class="rem-row" style="margin-top:14px">
-        <div><b>Ask how hard it was</b><small>After the last set of each lift: how many more reps you had in you. Easy sets earn bigger jumps.</small></div>
+        <div><b>Ask how hard it was</b><small>After the last set of each lift: could you have done one more rep? A no means it was all-out, so next time you match it before adding reps.</small></div>
         <button class="toggle ${S.settings.askRir !== false ? 'on' : ''}" data-a="ask-rir">${S.settings.askRir !== false ? 'On' : 'Off'}</button>
       </div>
-      <div class="sh-hint">Starts by itself after each set (after each round in a superset). iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
+      <div class="sh-hint">Pops up in the corner after each set. Partway through a superset round it counts up instead. iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
     </div>
 
     ${proteinCard()}
