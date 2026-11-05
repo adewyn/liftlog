@@ -1,11 +1,14 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.7.2';
+const APP_VERSION = '2.8.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
 const ACT_TYPES = { yoga: 'Yoga', walk: 'Walk', run: 'Run' };
+// One "Walk/run" button; the pace sorts it once distance and time are in.
+const ADD_TYPES = { yoga: 'Yoga', walk: 'Walk/run' };
+const WALK_PACE = 15, RUN_PACE = 12.5; // min per mile: slower than 15:00 is a walk, faster than 12:30 a run, between is both
 const COACH_MARK = { up: '▲', down: '▼', reps: '↗', hold: '→', beat: '★' };
 const DEFAULT_SETTINGS = {
   restSec: 90, smartRest: true, sound: true, lastBackup: null,
@@ -1771,7 +1774,7 @@ const ACTIVITIES = [
 const CUSTOM_ACT = { id: 'custom', mets: [3.5, 5.5, 7.5], levels: ['Easy', 'Moderate', 'Hard'], hint: ['Could chat easily', 'Breathing harder, could still talk', 'Hard to talk'], dist: 'pace' };
 const actDef = a => ACTIVITIES.find(x => x.id === a.kind) || { ...CUSTOM_ACT, name: a.name };
 const actLevel = (a, def) => Math.max(0, Math.min(def.mets.length - 1, a.level ?? Math.floor((def.mets.length - 1) / 2)));
-const actName = a => (a.type === 'other' ? a.name : a.type === 'yoga' ? `${YOGA_STYLES[a.style] || ''} yoga`.trim() : ACT_TYPES[a.type]);
+const actName = a => (a.type === 'other' ? a.name : a.type === 'yoga' ? `${YOGA_STYLES[a.style] || ''} yoga`.trim() : moveLabel(a));
 const ENERGY = { low: 'Low', ok: 'OK', great: 'Great' };
 const SLEEP = [[5, '≤5'], [6, '6'], [7, '7'], [8, '8'], [9, '9+']];
 // Older entries were stored as range midpoints (6.5, 7.5); show them as the nearest hour.
@@ -1981,6 +1984,14 @@ const durText = a => {
   return `Length: ${fmtLen(m)}${clockMin(a.start) == null || clockMin(a.end) == null ? ' (typed in)' : ''}`;
 };
 const paceOf = a => (+a.dist > 0 && actMinutes(a) > 0) ? actMinutes(a) / +a.dist : null;
+// Walk/runs logged since 2.8 (a.auto) take their type from the pace. Older ones keep the type picked then.
+function autoMoveType(a) {
+  if (!a || !a.auto) return;
+  const p = paceOf(a);
+  if (a.style === 'intervals') { a.type = 'run'; a.mix = false; }
+  else if (p) { a.type = p >= WALK_PACE ? 'walk' : 'run'; a.mix = p < WALK_PACE && p >= RUN_PACE; }
+}
+const moveLabel = a => (a.auto && !paceOf(a) && a.style !== 'intervals' ? 'Walk/run' : a.mix ? 'Walk + run' : ACT_TYPES[a.type]);
 const fmtPace = m => { const sec = Math.round(m * 60); return `${Math.floor(sec / 60)}:${pad(sec % 60)}`; };
 
 // How hard an activity is, in METs (1 = sitting still). Walks and runs use the ACSM equations from
@@ -2327,7 +2338,7 @@ const sessionBody = w => (w.type === 'strength' ? sessionStrength(w) : w.type ==
 function alsoToday(w) {
   const other = S.workouts.filter(x => x.date === w.date && x !== w && hasWork(x));
   if (!other.length) return '';
-  const bits = other.flatMap(x => [...(x.exercises || []).filter(e => doneSets(e).length).map(e => e.name), ...(x.activities || []).filter(actDone).map(a => (a.type === 'other' ? a.name || 'Activity' : a.type === 'yoga' ? 'Yoga' : a.type === 'run' ? 'Run' : 'Walk'))]);
+  const bits = other.flatMap(x => [...(x.exercises || []).filter(e => doneSets(e).length).map(e => e.name), ...(x.activities || []).filter(actDone).map(a => (a.type === 'other' ? a.name || 'Activity' : a.type === 'yoga' ? 'Yoga' : moveLabel(a)))]);
   return `<div class="note-line muted">Also logged today: ${esc([...new Set(bits)].slice(0, 4).join(', '))}</div>`;
 }
 function viewToday() {
@@ -2520,7 +2531,7 @@ function sessionCardio(w) {
   return `${today ? cardioPlan(w, recC) : ''}
     ${actCards(w, recC)}
     <div class="add-row four">
-      ${Object.entries(ACT_TYPES).map(([t, n]) => `<button class="btn" data-a="add-act" data-wid="${w.id}" data-t="${t}">+ ${n}</button>`).join('')}
+      ${Object.entries(ADD_TYPES).map(([t, n]) => `<button class="btn" data-a="add-act" data-wid="${w.id}" data-t="${t}">+ ${n}</button>`).join('')}
       <button class="btn" data-a="act-pick" data-wid="${w.id}">+ Other</button>
     </div>
     ${notesCard(w)}
@@ -2582,10 +2593,12 @@ function yogaCard(w, a, k) {
   </div>`;
 }
 function moveCard(w, a, k, rec) {
-  const sug = rec && rec.type === a.type && rec.dist ? rec : null;
+  autoMoveType(a);
+  const sug = rec && rec.dist && (a.auto || rec.type === a.type) ? rec : null;
   return `<div class="card">
-    ${actHead(w, k, ACT_TYPES[a.type])}
-    ${a.type === 'run' ? `<div class="seg" style="margin-bottom:4px">${[['steady', 'Steady'], ['intervals', 'Intervals']].map(([v, n]) => `<button class="${(a.style || 'steady') === v ? 'on' : ''}" data-a="act-set" data-wid="${w.id}" data-i="${k}" data-f="style" data-v="${v}">${n}</button>`).join('')}</div>` : ''}
+    ${actHead(w, k, moveLabel(a))}
+    ${a.auto ? `<div class="sh-hint" style="margin-top:0">Your pace sorts it: slower than ${fmtPace(WALK_PACE)} /mi is a walk, faster than ${fmtPace(RUN_PACE)} a run, and between counts as both.</div>` : ''}
+    ${a.type === 'run' || a.auto ? `<div class="seg" style="margin-bottom:4px">${[['steady', 'Steady'], ['intervals', 'Intervals']].map(([v, n]) => `<button class="${(a.style || 'steady') === v ? 'on' : ''}" data-a="act-set" data-wid="${w.id}" data-i="${k}" data-f="style" data-v="${v}">${n}</button>`).join('')}</div>` : ''}
     <label class="lbl">Distance (miles)</label>
     <input class="inp" inputmode="decimal" data-wid="${w.id}" data-wb="activities.${k}.dist" value="${esc(a.dist)}" placeholder="${sug ? sug.dist : '0.0'}">
     <div class="grid2" style="margin-top:12px">
@@ -2641,8 +2654,9 @@ function summaryOf(w) {
     if (a.type === 'yoga') { parts.push(`${YOGA_STYLES[a.style] || 'Yoga'} yoga ${+a.min >= 60 ? '1 hr' : `${a.min || 30} min`}`); return; }
     const p = paceOf(a), m = actMinutes(a);
     if (a.type === 'other') { parts.push(`${a.name}${m ? ` ${fmtDur(m)}` : ''}${+a.dist ? ` · ${a.dist} mi` : ''}`); return; }
-    if (p) parts.push(`${ACT_TYPES[a.type]} ${a.dist} mi · ${fmtPace(p)} /mi`);
-    else parts.push(a.dist ? `${ACT_TYPES[a.type]} ${a.dist} mi` : m ? `${ACT_TYPES[a.type]} ${fmtDur(m)}` : ACT_TYPES[a.type]);
+    const n = moveLabel(a);
+    if (p) parts.push(`${n} ${a.dist} mi · ${fmtPace(p)} /mi`);
+    else parts.push(a.dist ? `${n} ${a.dist} mi` : m ? `${n} ${fmtDur(m)}` : n);
   });
   return (parts.join(' · ') || 'Notes only') + (kcal ? ` · ~${kcal} cal` : '');
 }
@@ -3687,7 +3701,7 @@ function actSheetHTML() {
   const known = new Set(recent.map(a => a.kind));
   return `<div class="sh-grip"></div>
     <div class="sh-title">Add an activity<span>Counts for your streak, calories, and tomorrow's picks</span></div>
-    <div class="alt-row pick-row">${Object.entries(ACT_TYPES).map(([t, n]) => btn(`data-t="${t}"`, n)).join('')}</div>
+    <div class="alt-row pick-row">${Object.entries(ADD_TYPES).map(([t, n]) => btn(`data-t="${t}"`, n)).join('')}</div>
     ${recent.length ? `<label class="lbl">Recent</label><div class="alt-row pick-row">${recent.map(a => btn(`data-t="other" data-kind="${esc(a.kind)}" data-n="${esc(a.name)}"`, a.name)).join('')}</div>` : ''}
     <label class="lbl">More</label>
     <div class="alt-row pick-row">${ACTIVITIES.filter(x => !known.has(x.id)).map(x => btn(`data-t="other" data-kind="${x.id}" data-n="${esc(x.name)}"`, x.name)).join('')}</div>
@@ -4327,7 +4341,7 @@ const ACT = {
     const w = getW(d.wid);
     w.activities = w.activities || [];
     if (d.t === 'yoga') { ACT['add-yoga']({ wid: d.wid, id: recommendYoga(w.date).pick.id }); return; }
-    w.activities.push({ type: d.t, dist: '', min: '', sec: '', notes: '', ...(d.style ? { style: d.style } : {}) });
+    w.activities.push({ type: d.t, auto: true, dist: '', min: '', sec: '', notes: '', ...(d.style ? { style: d.style } : {}) });
     persist(w); render(); scrollToAct(w);
   },
   'add-yoga': d => {
@@ -4340,6 +4354,7 @@ const ACT = {
   'act-set': d => {
     const w = getW(d.wid), a = w.activities[+d.i];
     a[d.f] = d.f === 'min' || d.f === 'level' ? +d.v : (d.f === 'feel' && a.feel === d.v ? '' : d.v);
+    autoMoveType(a);
     persist(w); render();
   },
   energy: d => setEnergy(d.v),
@@ -4399,7 +4414,7 @@ const ACT = {
   'rm-act': d => {
     const w = getW(d.wid), [a] = w.activities.splice(+d.i, 1);
     persist(w); render();
-    toastUndo(`Removed ${a.type === 'other' ? a.name || 'activity' : (ACT_TYPES[a.type] || 'activity')}`, () => { w.activities.splice(+d.i, 0, a); persist(w); render(); });
+    toastUndo(`Removed ${a.type === 'other' ? a.name || 'activity' : (a.type === 'yoga' ? 'Yoga' : moveLabel(a) || 'activity')}`, () => { w.activities.splice(+d.i, 0, a); persist(w); render(); });
   },
   'checkin-open': () => { S.checkinOpen = true; render(); },
   'bm-view': d => { S.settings.bodyView = d.v; saveSettings(); render(); },
@@ -4545,6 +4560,7 @@ const ACT = {
     if (!a) return;
     a[d.f] = nowClock();
     actTimeSync(w, +d.i, d.f);
+    autoMoveType(a);
     persist(w); render();
   },
   'care-set': d => {
@@ -4679,6 +4695,12 @@ document.addEventListener('input', ev => {
       setPath(w, el.dataset.wb, el.value);
       const m = el.dataset.wb.match(/^activities\.(\d+)\.(\w+)/);
       if (m) actTimeSync(w, +m[1], m[2]);
+      const ma = m && w.activities[+m[1]];
+      if (ma && ma.auto) {
+        autoMoveType(ma);
+        const head = document.getElementById(`act-stats-${m[1]}`)?.closest('.card')?.querySelector('.act-head b');
+        if (head) head.textContent = moveLabel(ma);
+      }
       const src = el.dataset.wb === 'notes' ? 'w' : m && m[2] === 'notes' ? m[1] : null;
       const tags = src != null && document.getElementById(`ntags-${w.id}-${src}`);
       if (tags) tags.outerHTML = noteTagsFor(w, src);
