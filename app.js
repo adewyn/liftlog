@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.7.1';
+const APP_VERSION = '2.7.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -974,9 +974,10 @@ function noteBanner(date) {
   return lines.length ? `<div class="card note-banner">${lines.map(l => `<div>${l}</div>`).join('')}</div>` : '';
 }
 function soreCard(w) {
-  const allDone = w.exercises.length && w.exercises.every(e => e.sets.every(x => x.done));
-  if (w.type !== 'strength' || w.date !== todayStr() || allDone) return '';
-  const on = soreFor(w.date), out = w.soreOut || [], add = w.exercises.filter(e => e.soreAdd);
+  if (w.type !== 'strength' || w.date !== todayStr()) return '';
+  const ex = w.exercises || [];
+  if (ex.length && ex.every(e => e.sets.every(x => x.done))) return '';
+  const on = soreFor(w.date), out = w.soreOut || [], add = ex.filter(e => e.soreAdd);
   const sug = Object.values(soreFromNotes(w.date)).filter(x => !on.includes(x.about));
   const day = d => (d === w.date ? 'today' : d === addDays(w.date, -1) ? 'yesterday' : esc(fmtDate(d, { weekday: 'long' })));
   return `<div class="card sore-card">
