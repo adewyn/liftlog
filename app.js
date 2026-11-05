@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1530,13 +1530,17 @@ function timerDone() {
 
 // Sound needs a tap first on iPhone, so the audio is unlocked on every tap.
 let actx = null;
-function unlockAudio() {
+function unlockAudio(ev) {
   try {
     if (!actx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC) actx = new AC();
     }
-    if (actx && actx.state === 'suspended') actx.resume();
+    // A level pop-up's sound waits for the first tap, unless that tap closes it.
+    if (S.lvSoundPending && ev && ev.target && ev.target.closest && ev.target.closest('[data-a="lv-close"]')) S.lvSoundPending = null;
+    const play = () => { const f = S.lvSoundPending; if (f && actx && actx.state === 'running') { S.lvSoundPending = null; try { f(); } catch (e) { /* no audio */ } } };
+    if (actx && actx.state === 'suspended') actx.resume().then(play, () => {});
+    else play();
   } catch (e) { /* no audio */ }
 }
 function beep() {
@@ -1664,6 +1668,7 @@ function render() {
   $('#view').innerHTML = html;
   lightMuscles();
   celebrateDay();
+  checkLevels();
 }
 
 // ----- daily streak -----
@@ -2352,7 +2357,7 @@ function viewToday() {
     <header class="top">
       <div class="top-row">
         <div class="eyebrow">Today · ${esc(fmtDate(date, { month: 'long', day: 'numeric' }))}</div>
-        <button class="streak-pill ${dayCounts(date) ? 'on' : ''}" data-a="tab" data-t="stats" aria-label="Daily streak">🔥 ${dailyStreak()}</button>
+        <div class="pills">${levelPill()}<button class="streak-pill ${dayCounts(date) ? 'on' : ''}" data-a="tab" data-t="stats" aria-label="Daily streak">🔥 ${dailyStreak()}</button></div>
       </div>
       ${custom ? `<h1>${esc(w.label)}<span class="sub">${w.dayKey === 'free' ? 'Build it as you go' : 'One of your saved workouts'}</span></h1>`
         : `<h1>${DAY_NAMES[realKey]}<span class="sub">${esc(day.label)}${w.dayKey !== realKey ? ` (${DAY_NAMES[w.dayKey]}'s workout)` : ''}</span></h1>`}
@@ -3087,6 +3092,7 @@ function viewStats() {
     </div>`).join('');
 
   return `<header class="top"><h1>Stats</h1></header>
+    ${levelsCard()}
     ${streakCard()}
     ${S.workouts.some(hasWork) ? `<button class="card cmp-entry" data-a="cmp-open">${ic('chart')}<div><b>Months and years</b><small>Compare any two months or years, with graphs</small></div>${ic('chev')}</button>` : ''}
     <div class="card">
@@ -3978,6 +3984,331 @@ async function trainerToggle() {
   try { await pushApi('sync', { k: t.k, off: true }); toast('Nightly trainer off. Your copy on the server is deleted.'); } catch (err) { toast("Trainer off. Couldn't reach the server to delete the copy; turn it on and off again later."); }
 }
 
+// ---------- levels ----------
+// Each skill has its own level, like an RPG: 1 is your lowest point on record and 60 is fully built and
+// athletic. Your overall level is the average. A skill goes up as soon as it earns the next level. It
+// only drops once it slips more than a full level below, and drops are checked once a day, so normal
+// day-to-day swings don't bounce it around.
+const LV_MAX = 60;
+const LV_DB = /\b(db|dumbbells?|kettlebells?|kb|one.?arm|single.?arm)\b/;
+// Strength skills turn every matching lift into one reference lift (an estimated one-rep max), so
+// switching between, say, barbell bench and DB bench doesn't reset you. Dumbbell factors include both hands.
+const LV_LIFTS = {
+  chest: { ref: 'bench press', goal: 250, no: /\b(dip|fly|flye|shoulder|overhead|triceps|close|pushdown|crossover)/, rules: [
+    [n => /incline/.test(n) && LV_DB.test(n), 2.9], [n => LV_DB.test(n) && /bench|chest press|floor press|\bpress\b/.test(n), 2.5],
+    [n => /incline/.test(n) && /press|bench/.test(n), 1.15], [n => /bench press|barbell bench/.test(n), 1], [n => /chest press/.test(n), 0.9]] },
+  shoulders: { ref: 'overhead press', goal: 155, no: /\b(cuban|raise|bench|chest|incline)/, rules: [
+    [n => /(shoulder|overhead|military|arnold) press/.test(n) && LV_DB.test(n), 2.35], [n => /machine/.test(n) && /shoulder press/.test(n), 0.9],
+    [n => /(overhead|military|shoulder) press|^ohp\b/.test(n), 1]] },
+  lats: { ref: 'lat pulldown', goal: 220, no: /\b(assist|band|negative|straight.?arm)/, rules: [[n => /pulldown/.test(n), 1], [n => /\b(pull|chin)-up/.test(n), 'bw']] },
+  back: { ref: 'row', goal: 225, no: /\b(upright|couch|face|inverted|ring)/, rules: [[n => /\brows?\b/.test(n) && LV_DB.test(n), 2.25], [n => /\brows?\b/.test(n), 1]] },
+  legs: { ref: 'leg press', goal: 500, no: /\b(bodyweight|kettlebell|kb|goblet|split|single|lunge|wide single|curl|extension|calf|jump)/, rules: [
+    [n => /leg press/.test(n), 1], [n => /pendulum|hack|belt squat/.test(n), 1.5], [n => /hex bar squat|trap bar squat/.test(n), 1.4], [n => /\bsquat/.test(n), 1.6]] },
+  glutes: { ref: 'hip thrust', goal: 405, no: /\b(single|one.?leg|kettlebell|kb)/, rules: [
+    [n => /hip thrust|glute bridge/.test(n), 1], [n => /romanian|\brdl\b|stiff/.test(n), 1.45], [n => /(hex|trap) bar deadlift/.test(n), 1], [n => /deadlift/.test(n), 1.1]] },
+  arms: { ref: 'barbell curl', goal: 125, no: /\b(leg|hamstring|wrist|mace|nordic)/, rules: [
+    [n => /curl/.test(n) && (LV_DB.test(n) || /hammer/.test(n)), 2.4], [n => /(bar|barbell|ez|ez-bar|cable) curl/.test(n), 1], [n => /curl/.test(n), 0.9]] },
+};
+const LV_SKILLS = [
+  { k: 'chest', name: 'Chest', group: 'Strength' }, { k: 'shoulders', name: 'Shoulders', group: 'Strength' },
+  { k: 'lats', name: 'Lats', group: 'Strength' }, { k: 'back', name: 'Back', group: 'Strength' },
+  { k: 'legs', name: 'Legs', group: 'Strength' }, { k: 'glutes', name: 'Glutes', group: 'Strength' },
+  { k: 'arms', name: 'Arms', group: 'Strength' },
+  { k: 'chestSize', name: 'Chest size', group: 'Size', meas: 'chest', goal: 46 },
+  { k: 'armSize', name: 'Arm size', group: 'Size', meas: 'arm', goal: 16 },
+  { k: 'thighSize', name: 'Thigh size', group: 'Size', meas: 'thigh', goal: 26 },
+  { k: 'waist', name: 'Waist', group: 'Size', meas: 'waist', goal: 32, lower: true },
+  { k: 'weight', name: 'Bodyweight', group: 'Athlete' },
+  { k: 'cardio', name: 'Cardio', group: 'Athlete', goal: 60 / 8.5 },
+  { k: 'habit', name: 'Consistency', group: 'Athlete', goal: 40 },
+];
+const LV_TRY = {
+  chest: 'Get both weekly presses in (incline and flat), 3 hard sets each, stopping 1–2 reps short of failure.',
+  shoulders: 'Press overhead once a week and keep the lateral raises going.',
+  lats: 'Do pulldowns or pull-ups twice a week, and add a rep before you add weight.',
+  back: 'Row twice a week, with a short squeeze at the top of each rep.',
+  legs: 'Leg press or pendulum squat every week, 10–15 smooth reps, adding a little at a time.',
+  glutes: 'Keep hip thrusts in twice a week, plus your RDLs.',
+  arms: 'Do curls and pushdowns twice a week, close to failure.',
+  chestSize: 'Keep chest work twice a week and eat enough to grow. Measure the same spot each time.',
+  armSize: 'Do curls and pushdowns twice a week, close to failure. Measure flexed, at the biggest part.',
+  thighSize: 'Keep leg press, split squats, and RDLs in, and eat enough to grow.',
+  waist: "That one's mostly diet: a small daily trim while keeping protein high.",
+  cardio: 'One easy run a week keeps it, and a faster one raises it.',
+  habit: 'Aim for 3 lifting days and 2 cardio days a week. Showing up is the biggest lever there is.',
+};
+const lvGoal = sk => (LV_LIFTS[sk.k] ? LV_LIFTS[sk.k].goal : sk.k === 'weight' ? Math.round(25 * (S.settings.profile.heightIn || 75) ** 2 / 703) : sk.goal);
+function lvLevel(v, base, goal, lower) {
+  const span = lower ? base - goal : goal - base;
+  const t = span > 0 ? (lower ? base - v : v - base) / span : (lower ? v <= goal : v >= goal) ? 1 : 0;
+  return 1 + (LV_MAX - 1) * Math.min(1, Math.max(0, t));
+}
+const lvFirstDate = () => S.workouts.filter(w => w.date <= todayStr() && hasWork(w)).map(w => w.date).sort()[0] || null;
+// Bodyweight: the average of the last two weeks of weigh-ins (before the first weigh-in, the first one).
+function lvWeight(date) {
+  const all = Object.values(S.body).filter(b => b.weight != null && +b.weight > 0).sort((a, c) => a.date.localeCompare(c.date));
+  if (!all.length) return null;
+  const near = all.filter(b => b.date <= date && b.date >= addDays(date, -13));
+  if (near.length) return { v: sum(near.map(b => +b.weight)) / near.length, n: near.length };
+  const before = all.filter(b => b.date <= date);
+  return { v: +(before.length ? before[before.length - 1] : all[0]).weight };
+}
+function lvMeas(key, date) {
+  const all = Object.values(S.body).filter(b => b.meas && +b.meas[key] > 0).sort((a, c) => a.date.localeCompare(c.date));
+  if (!all.length) return null;
+  const before = all.filter(b => b.date <= date), b = before.length ? before[before.length - 1] : all[0];
+  return { v: +b.meas[key], on: b.date };
+}
+// Every lift session turned into reference-lift numbers, per skill, plus runs as speed (mph).
+function lvSessions() {
+  const out = { cardio: [] }, today = todayStr();
+  Object.keys(LV_LIFTS).forEach(k => { out[k] = []; });
+  S.workouts.filter(w => w.date <= today).forEach(w => {
+    (w.exercises || []).forEach(e => {
+      const n = normName(e.name).toLowerCase(), note = ((e.target || {}).note || '').toLowerCase();
+      if (/stack|#/.test(n) || /stack|assist/.test(note)) return;
+      for (const [k, sk] of Object.entries(LV_LIFTS)) {
+        if (sk.no.test(n)) continue;
+        const rule = sk.rules.find(([m]) => m(n));
+        if (!rule) continue;
+        const f = rule[1];
+        let best = 0, top = null;
+        doneSets(e).filter(s => +s.r >= 1 && +s.r <= 15).forEach(s => {
+          const wt = f === 'bw' ? ((lvWeight(w.date) || {}).v || 185) + (+s.w || 0) : +s.w;
+          const v = wt > 0 ? e1rm(wt, +s.r) * (f === 'bw' ? 0.8 : f) : 0;
+          if (v > best) { best = v; top = s; }
+        });
+        if (best) out[k].push({ date: w.date, v: best, name: e.name, set: `${+top.w ? `${+top.w}×` : ''}${top.r}` });
+        break;
+      }
+    });
+    (w.activities || []).forEach(a => {
+      const p = a.type === 'run' && a.style !== 'intervals' && +a.dist >= 1 ? paceOf(a) : null;
+      if (p && p > 4.5 && p < 20) out.cardio.push({ date: w.date, v: 60 / p, name: `${a.dist} mi run`, set: `${fmtPace(p)} /mi` });
+    });
+  });
+  Object.values(out).forEach(l => l.sort((a, c) => a.date.localeCompare(c.date)));
+  return out;
+}
+// A lift skill's value on a date: the best of its last six weeks of sessions. After three weeks
+// without it, it fades about 2% a week (to 75% at most), because strength does too.
+function lvLiftAt(list, date) {
+  let i = list.length - 1;
+  while (i >= 0 && list[i].date > date) i--;
+  if (i < 0) return list.length ? { v: list[0].v, idle: 0, best: list[0] } : null;
+  const from = addDays(list[i].date, -42);
+  let best = list[i];
+  for (let j = i; j >= 0 && list[j].date >= from; j--) if (list[j].v > best.v) best = list[j];
+  const idle = daysBetween(list[i].date, date);
+  return { v: best.v * (idle > 21 ? Math.max(0.75, 1 - 0.02 * (idle - 21) / 7) : 1), idle, best };
+}
+function lvValue(sk, ses, date) {
+  if (LV_LIFTS[sk.k] || sk.k === 'cardio') return lvLiftAt(ses[sk.k], date);
+  if (sk.meas) return lvMeas(sk.meas, date);
+  if (sk.k === 'weight') return lvWeight(date);
+  if (sk.k === 'habit') {
+    if (!lvFirstDate()) return null;
+    const from = addDays(date, -55);
+    return { v: new Set(S.workouts.filter(w => w.date >= from && w.date <= date && hasWork(w)).map(w => w.date)).size };
+  }
+  return null;
+}
+// Level 1 is the lowest point on record: checked week by week from your first workout to today.
+function lvLowest(sk, ses) {
+  const today = todayStr(), first = lvFirstDate() || today;
+  let low = null;
+  for (let d = first; ; d = addDays(d, 7)) {
+    const at = d > today ? today : d, x = lvValue(sk, ses, at);
+    if (x && (low == null || (sk.lower ? x.v > low : x.v < low))) low = x.v;
+    if (at === today) break;
+  }
+  return low;
+}
+function lvCompute() {
+  const ses = lvSessions(), today = todayStr(), bases = (S.settings.levels || {}).bases || {};
+  const skills = [];
+  LV_SKILLS.forEach(sk => {
+    const cur = lvValue(sk, ses, today);
+    if (!cur) return;
+    const base = bases[sk.k] ?? lvLowest(sk, ses), goal = lvGoal(sk);
+    skills.push({ ...sk, ...cur, base, goal, lv: lvLevel(cur.v, base, goal, sk.lower) });
+  });
+  return skills;
+}
+const lvOverall = shown => { const v = Object.values(shown); return v.length ? Math.floor(sum(v) / v.length) : 1; };
+function lvFmt(sk, v) {
+  if (v == null) return '–';
+  if (LV_LIFTS[sk.k]) return `${Math.round(v)} lb`;
+  if (sk.meas) return `${round1(v)}"`;
+  if (sk.k === 'weight') return `${round1(v)} lb`;
+  if (sk.k === 'cardio') return `${fmtPace(60 / v)} /mi`;
+  return `${Math.round(v)} workouts`;
+}
+// The value a level starts at, for "next level at …".
+const lvValueFor = (s, lv) => s.base + (s.lower ? -1 : 1) * Math.abs(s.goal - s.base) * (lv - 1) / (LV_MAX - 1);
+const lvLower = n => (/^[A-Z][a-z]/.test(n) ? n[0].toLowerCase() + n.slice(1) : n);
+function lvWhy(s, was) {
+  const old = was != null && lvFmt(s, was) !== lvFmt(s, s.v) ? was : null;
+  if ((LV_LIFTS[s.k] || s.k === 'cardio') && s.idle > 21) return `No ${s.k === 'cardio' ? 'runs' : `${s.name.toLowerCase()} work`} logged in ${Math.round(s.idle / 7)} weeks, so it's fading.`;
+  if (LV_LIFTS[s.k]) return `Your best ${lvLower(s.best.name)} lately (${s.best.set}) works out to a ${lvFmt(s, s.v)} ${LV_LIFTS[s.k].ref}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
+  if (s.k === 'cardio') return `Your best recent pace is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
+  if (s.k === 'weight') return `Your two-week average is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
+  if (s.k === 'waist') return `Your waist measured ${lvFmt(s, s.v)}${old ? `, up from ${lvFmt(s, old)}` : ''}.`;
+  if (s.meas) return `Your ${s.name.toLowerCase().replace(' size', '')} measured ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
+  return `${Math.round(s.v)} workout days in the last 8 weeks${old ? `, down from ${Math.round(old)}` : ''}.`;
+}
+const lvTry = s => (s.k === 'weight' ? `For size, hold steady or gain slowly: eat a little more and hit your protein (${liveTarget(todayStr())} g).` : LV_TRY[s.k]);
+
+// Runs after every render: level-ups right away, level drops once a day.
+function checkLevels() {
+  if (S.lvChecking || document.querySelector('.lv-pop')) return;
+  S.lvChecking = true;
+  try {
+    const skills = lvCompute(), today = todayStr();
+    if (!skills.length) return;
+    let st = S.settings.levels;
+    if (!st || !st.shown) {
+      st = S.settings.levels = { bases: {}, shown: {}, vals: {}, downDay: today };
+      skills.forEach(s => { st.bases[s.k] = s.base; st.shown[s.k] = Math.floor(s.lv); st.vals[s.k] = s.v; });
+      saveSettings();
+      lvPop({ kind: 'intro', overall: lvOverall(st.shown), n: skills.length });
+      return;
+    }
+    const before = lvOverall(st.shown), ups = [], downs = [], checkDown = st.downDay !== today;
+    let changed = false;
+    skills.forEach(s => {
+      const was = st.shown[s.k];
+      if (was == null) { st.bases[s.k] = s.base; st.shown[s.k] = Math.floor(s.lv); st.vals[s.k] = s.v; changed = true; return; }
+      if (Math.floor(s.lv) > was) ups.push({ s, from: was, to: Math.floor(s.lv) });
+      else if (checkDown && s.lv < was - 1) downs.push({ s, from: was, to: Math.floor(s.lv) + 1, old: st.vals[s.k] });
+    });
+    if (checkDown) { st.downDay = today; changed = true; }
+    [...ups, ...downs].forEach(c => { st.shown[c.s.k] = c.to; st.vals[c.s.k] = c.s.v; changed = true; });
+    if (changed) saveSettings();
+    const after = lvOverall(st.shown);
+    if (ups.length) lvPop({ kind: 'up', list: ups, from: before, to: downs.length ? before : after });
+    if (downs.length) lvPop({ kind: 'down', list: downs, from: before, to: after });
+  } finally { S.lvChecking = false; }
+}
+
+// ----- level pop-ups -----
+const lvQueue = [];
+function lvPop(p) { lvQueue.push(p); if (!document.querySelector('.lv-pop')) lvNext(); }
+function lvNext() {
+  const p = lvQueue.shift();
+  if (!p) return;
+  const el = document.createElement('div');
+  el.className = `lv-pop ${p.kind === 'down' ? 'down' : 'up'}`;
+  el.setAttribute('role', 'dialog');
+  el.innerHTML = lvPopHTML(p);
+  document.body.appendChild(el);
+  haptic();
+  lvSound(p.kind === 'down' ? sadTrombone : fanfare);
+}
+function lvPopHTML(p) {
+  const conf = p.kind === 'down' ? '' : `<div class="lv-conf" aria-hidden="true">${Array.from({ length: 18 }, (_, k) => `<i style="--x:${(k * 37) % 100}%;--d:${(k % 6) * 0.12}s;--c:${['var(--acc)', '#ffd34e', '#7cc6ff', '#ff8fb1'][k % 4]}"></i>`).join('')}</div>`;
+  if (p.kind === 'intro') {
+    return `<div class="lv-box">${conf}
+      <div class="lv-kicker">Levels unlocked</div>
+      <div class="lv-num">${p.overall}</div>
+      <div class="lv-sub">Your overall level, the average of ${p.n} skills. Each one runs from 1, your lowest point on record, to 60, fully built and athletic. Lift more, grow, and show up, and they climb. Slack off and they slip.</div>
+      <div class="btn-row"><button class="btn" data-a="lv-close">Let's go</button><button class="btn pri" data-a="lv-close" data-go="stats">See my skills</button></div>
+    </div>`;
+  }
+  const overall = p.to !== p.from;
+  if (p.kind === 'up') {
+    const top = p.list[0];
+    return `<div class="lv-box">${conf}
+      <div class="lv-kicker">${overall ? 'Level up!' : `${esc(top.s.name)} level up!`}</div>
+      <div class="lv-num">${overall ? p.to : top.to}</div>
+      <div class="lv-sub">${overall ? `Overall level ${p.from} → ${p.to}` : `Overall level ${p.to}. Keep stacking.`}</div>
+      <div class="lv-list">${p.list.map(c => `<div class="lv-row"><b>${esc(c.s.name)}</b><span>${c.from} → <em>${c.to}</em></span></div>`).join('')}</div>
+      <button class="btn pri block" data-a="lv-close">Let's go</button>
+    </div>`;
+  }
+  return `<div class="lv-box">
+    <div class="lv-sad" aria-hidden="true">😞</div>
+    <div class="lv-kicker">${overall ? 'Level lost' : `${p.list.length > 1 ? 'Skills' : esc(p.list[0].s.name)} slipped`}</div>
+    <div class="lv-num">${overall ? p.to : p.list[0].to}</div>
+    <div class="lv-sub">${overall ? `Overall level ${p.from} → ${p.to}` : `Overall level ${p.to}, for now.`}</div>
+    <div class="lv-list">${p.list.map(c => `<div class="lv-drop"><div class="lv-row"><b>${esc(c.s.name)}</b><span>${c.from} → <em>${c.to}</em></span></div>
+      <p>${esc(lvWhy(c.s, c.old))}</p><p class="lv-fix"><b>To win it back:</b> ${esc(lvTry(c.s))}</p></div>`).join('')}</div>
+    <button class="btn block" data-a="lv-close">I'll get it back</button>
+  </div>`;
+}
+// Sound needs a tap first on iPhone. A pop-up that opens before any tap plays its sound on the next tap,
+// unless that tap closes it.
+function lvSound(fn) {
+  if (!S.settings.sound) return;
+  if (actx && actx.state === 'running') { try { fn(); } catch (e) { /* no audio */ } } else S.lvSoundPending = fn;
+}
+function lvTone(f, t, len, type, vol, dest) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f, t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+  o.connect(g).connect(dest || actx.destination);
+  o.start(t);
+  o.stop(t + len + 0.05);
+  return o;
+}
+function fanfare() {
+  const t = actx.currentTime + 0.03;
+  [[392, 0], [523, 0.11], [659, 0.22], [784, 0.33]].forEach(([f, d]) => lvTone(f, t + d, 0.14, 'square', 0.08));
+  [523, 659, 784, 1047].forEach(f => lvTone(f, t + 0.46, 1.1, 'triangle', 0.14));
+  lvTone(1568, t + 0.46, 1.1, 'sine', 0.05);
+}
+function sadTrombone() {
+  const t = actx.currentTime + 0.03, lp = actx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = 1100; lp.connect(actx.destination);
+  [[294, 0, 0.36], [277, 0.4, 0.36], [262, 0.8, 0.36], [247, 1.2, 1.3]].forEach(([f, d, len], k) => {
+    const o = lvTone(f, t + d, len, 'sawtooth', 0.13, lp);
+    if (k === 3) {
+      const l = actx.createOscillator(), lg = actx.createGain();
+      l.frequency.value = 5.5; lg.gain.value = 7;
+      l.connect(lg).connect(o.frequency);
+      l.start(t + d + 0.2); l.stop(t + d + len);
+      o.frequency.linearRampToValueAtTime(f * 0.93, t + d + len);
+    }
+  });
+}
+
+// ----- levels card (Stats) and pill (Today) -----
+function levelsCard() {
+  const st = S.settings.levels;
+  if (!st || !st.shown) return '';
+  const skills = lvCompute();
+  if (!skills.length) return '';
+  const overall = lvOverall(st.shown), total = sum(skills.map(s => st.shown[s.k] || 1));
+  const open = skills.find(s => s.k === S.lvOpen);
+  const tile = s => {
+    const lv = st.shown[s.k] || 1, prog = lv >= LV_MAX ? 1 : Math.min(1, Math.max(0, s.lv - lv));
+    return `<button class="lv-tile ${S.lvOpen === s.k ? 'on' : ''}" data-a="lv-info" data-k="${s.k}" aria-label="${esc(s.name)} level ${lv}">
+      <span>${esc(s.name)}</span><b>${lv}</b><i style="--p:${Math.round(prog * 100)}%"></i></button>`;
+  };
+  const groups = [...new Set(skills.map(s => s.group))];
+  return `<div class="card lv-card">
+    <div class="lv-head"><div class="lv-big">${overall}</div>
+      <div><b>Overall level</b><div class="muted small">Total ${total} of ${skills.length * LV_MAX} · tap a skill for details</div></div></div>
+    ${groups.map(g => `<div class="lbl">${g}</div><div class="lv-grid">${skills.filter(s => s.group === g).map(tile).join('')}</div>`).join('')}
+    ${open ? lvDetail(open, st.shown[open.k] || 1) : ''}
+  </div>`;
+}
+function lvDetail(s, lv) {
+  const ref = LV_LIFTS[s.k] ? ` ${LV_LIFTS[s.k].ref}` : '';
+  const now = LV_LIFTS[s.k] && s.best ? `About a ${lvFmt(s, s.v)}${ref} max, from your ${esc(lvLower(s.best.name))} (${esc(s.best.set)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
+    : s.k === 'cardio' && s.best ? `Best recent pace ${lvFmt(s, s.v)} (${esc(s.best.name)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
+      : s.k === 'habit' ? `${Math.round(s.v)} workout days in the last 8 weeks.`
+        : s.k === 'weight' ? `Two-week average ${lvFmt(s, s.v)}.` : `Last measured ${lvFmt(s, s.v)}${s.on ? ` on ${esc(fmtDate(s.on, { month: 'short', day: 'numeric' }))}` : ''}.`;
+  return `<div class="lv-detail"><b>${esc(s.name)} · level ${lv}</b>
+    <p>${now}</p>
+    <p class="muted small">Level 1 = ${lvFmt(s, s.base)} (your lowest on record). Level 60 = ${lvFmt(s, s.goal)}${ref}.${lv < LV_MAX ? ` Level ${lv + 1} at ${lvFmt(s, lvValueFor(s, lv + 1))}.` : ''}</p>
+    <p class="muted small">${esc(LV_TRY[s.k] && s.k !== 'weight' ? LV_TRY[s.k] : lvTry(s))}</p></div>`;
+}
+const levelPill = () => (S.settings.levels && S.settings.levels.shown ? `<button class="streak-pill lv-pill" data-a="tab" data-t="stats" aria-label="Overall level">Lv ${lvOverall(S.settings.levels.shown)}</button>` : '');
+
 // ---------- backup ----------
 async function exportData() {
   const data = {
@@ -4643,6 +4974,14 @@ const ACT = {
   'trainer-toggle': () => trainerToggle(),
   'trainer-now': async () => { await trainerSync(true); await trainerPull(); render(); toast(Date.now() - S.settings.trainer.lastSync < 5000 ? 'Sent.' : "Couldn't send. Check your connection."); },
   'coach-notes': () => { S.coachNotesOpen = !S.coachNotesOpen; render(); },
+  'lv-close': d => {
+    S.lvSoundPending = null;
+    const el = document.querySelector('.lv-pop');
+    if (el) el.remove();
+    if (d.go) { S.tab = d.go; S.view = null; S.lvOpen = null; render(); scrollTo(0, 0); }
+    lvNext();
+  },
+  'lv-info': d => { S.lvOpen = S.lvOpen === d.k ? null : d.k; render(); },
   'coach-ok': d => { const c = S.coachLog.find(x => x.id === d.k); if (c) { c.seen = true; saveCoachLog(); } render(); },
   'coach-undo': async d => {
     const c = S.coachLog.find(x => x.id === d.k);
