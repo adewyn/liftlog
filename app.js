@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.9.1';
+const APP_VERSION = '2.9.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4080,7 +4080,7 @@ function lvSessions() {
           const v = wt > 0 ? e1rm(wt, +s.r) * (f === 'bw' ? 0.8 : f) : 0;
           if (v > best) { best = v; top = s; }
         });
-        if (best) out[k].push({ date: w.date, v: best, name: e.name, set: `${+top.w ? `${+top.w}×` : ''}${top.r}` });
+        if (best) out[k].push({ date: w.date, v: best, f, name: e.name, set: `${+top.w ? `${+top.w}×` : ''}${top.r}` });
         break;
       }
     });
@@ -4138,9 +4138,12 @@ function lvCompute() {
   return skills;
 }
 const lvOverall = shown => { const v = Object.values(shown); return v.length ? Math.floor(sum(v) / v.length) : 1; };
+// Lift numbers show in the lift you actually did lately (your DB bench, your RDL), as weight for 12 reps.
+const lvF = s => (LV_LIFTS[s.k] && s.best && typeof s.best.f === 'number' ? s.best.f : 1);
+const lvLift = s => (lvF(s) !== 1 || (s.best && s.best.f === 1) ? lvLower(normName(s.best.name)).replace(/\bromanian\b/, 'Romanian') : LV_LIFTS[s.k].ref);
 function lvFmt(sk, v) {
   if (v == null) return '–';
-  if (LV_LIFTS[sk.k]) return `${Math.round(v / LV_12)} lb × 12`;
+  if (LV_LIFTS[sk.k]) return `${Math.round(v / lvF(sk) / LV_12)} lb × 12`;
   if (sk.meas) return `${round1(v)}"`;
   if (sk.k === 'weight') return `${round1(v)} lb`;
   if (sk.k === 'cardio') return `${fmtPace(60 / v)} /mi`;
@@ -4152,7 +4155,7 @@ const lvLower = n => (/^[A-Z][a-z]/.test(n) ? n[0].toLowerCase() + n.slice(1) : 
 function lvWhy(s, was) {
   const old = was != null && lvFmt(s, was) !== lvFmt(s, s.v) ? was : null;
   if ((LV_LIFTS[s.k] || s.k === 'cardio') && s.idle > 21) return `No ${s.k === 'cardio' ? 'runs' : `${s.name.toLowerCase()} work`} logged in ${Math.round(s.idle / 7)} weeks, so it's fading.`;
-  if (LV_LIFTS[s.k]) return `Your best ${lvLower(s.best.name)} lately (${s.best.set}) is like ${lvFmt(s, s.v)} on ${LV_LIFTS[s.k].ref}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
+  if (LV_LIFTS[s.k]) return `Your best ${lvLift(s)} set lately was ${s.best.set.replace('×', ' × ')}, about ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'cardio') return `Your best recent pace is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'weight') return `Your two-week average is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'waist') return `Your waist measured ${lvFmt(s, s.v)}${old ? `, up from ${lvFmt(s, old)}` : ''}.`;
@@ -4299,8 +4302,8 @@ function levelsCard() {
   </div>`;
 }
 function lvDetail(s, lv) {
-  const ref = LV_LIFTS[s.k] ? ` on ${LV_LIFTS[s.k].ref}` : '';
-  const now = LV_LIFTS[s.k] && s.best ? `Like ${lvFmt(s, s.v)}${ref}, from your ${esc(lvLower(s.best.name))} (${esc(s.best.set)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
+  const ref = LV_LIFTS[s.k] ? ` on ${esc(lvLift(s))}` : '';
+  const now = LV_LIFTS[s.k] && s.best ? `Your best single ${esc(lvLift(s))} set lately: ${esc(s.best.set.replace('×', ' × '))}. That's about ${lvFmt(s, s.v)}${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
     : s.k === 'cardio' && s.best ? `Best recent pace ${lvFmt(s, s.v)} (${esc(s.best.name)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
       : s.k === 'habit' ? `${Math.round(s.v)} workout days in the last 8 weeks.`
         : s.k === 'weight' ? `Two-week average ${lvFmt(s, s.v)}.` : `Last measured ${lvFmt(s, s.v)}${s.on ? ` on ${esc(fmtDate(s.on, { month: 'short', day: 'numeric' }))}` : ''}.`;
