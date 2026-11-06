@@ -857,6 +857,11 @@ body.has-timer .streak-pill { visibility: hidden; }
 .lv-tile.on { border-color: rgba(198, 242, 78, .5); background: var(--s3); }
 .lv-detail { margin-top: 12px; padding: 12px 14px; border-radius: 14px; background: var(--s2); }
 .lv-detail p { margin: 6px 0 0; }
+.lv-hist { margin: 4px 0 12px; }
+.lv-detail .lv-hist { margin: 12px 0 0; }
+.lv-range { margin-bottom: 8px; }
+.lv-range button { min-height: 36px; font-size: 13px; }
+.lv-hist-btn { display: block; width: 100%; min-height: 40px; margin: 12px 0; border-radius: 12px; background: var(--s2); border: 1px solid var(--line); color: var(--mut); font-weight: 650; font-size: 13px; }
 
 .lv-pop {
   position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 16px;

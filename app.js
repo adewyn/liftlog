@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.9.2';
+const APP_VERSION = '2.10.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4137,6 +4137,33 @@ function lvCompute() {
   });
   return skills;
 }
+// Level history: rebuilt from your saved workouts and measurements, one point a week from your first
+// workout to today, using the same level 1 starting points. Cached until your log changes.
+let lvHistCache = null;
+function lvHistory(skills) {
+  const today = todayStr(), recent = S.workouts.slice(-12).map(w => `${w.date}${(w.exercises || []).map(e => doneSets(e).length).join('')}${(w.activities || []).length}`).join('|');
+  const key = `${today}#${S.workouts.length}#${Object.keys(S.body).length}#${skills.map(k => k.k + k.base).join()}#${recent}`;
+  if (lvHistCache && lvHistCache.key === key) return lvHistCache;
+  const ses = lvSessions(), first = lvFirstDate() || today, by = {}, overall = [];
+  skills.forEach(k => { by[k.k] = []; });
+  for (let d = first; ; d = addDays(d, 7)) {
+    const at = d > today ? today : d, t = parseYmd(at).getTime(), lvs = [];
+    skills.forEach(k => {
+      const x = lvValue(k, ses, at);
+      const lv = x ? lvLevel(x.v, k.base, k.goal, k.lower) : 1;
+      by[k.k].push([t, Math.round(lv * 10) / 10]); lvs.push(lv);
+    });
+    if (lvs.length) overall.push([t, Math.round(sum(lvs) / lvs.length * 10) / 10]);
+    if (at === today) break;
+  }
+  return (lvHistCache = { key, by, overall });
+}
+const LV_RANGES = [[91, '3 months'], [365, 'Year'], [0, 'All']];
+function lvChart(pts) {
+  const days = S.lvRange ?? 0, from = days ? Date.now() - days * 864e5 : 0, p = pts.filter(q => q[0] >= from);
+  return p.length > 1 ? lineChart([{ name: 'Level', color: 'var(--acc)', pts: p }]) : '<p class="muted small">Not enough history in this range yet.</p>';
+}
+const lvRangeSeg = () => `<div class="seg lv-range">${LV_RANGES.map(([d, n]) => `<button class="${(S.lvRange ?? 0) === d ? 'on' : ''}" data-a="lv-range" data-v="${d}">${n}</button>`).join('')}</div>`;
 const lvOverall = shown => { const v = Object.values(shown); return v.length ? Math.floor(sum(v) / v.length) : 1; };
 // Lift numbers show in the lift you actually did lately (your DB bench, your RDL), as weight for 12 reps.
 const lvF = s => (LV_LIFTS[s.k] && s.best && typeof s.best.f === 'number' ? s.best.f : 1);
@@ -4297,11 +4324,13 @@ function levelsCard() {
   return `<div class="card lv-card">
     <div class="lv-head"><div class="lv-big">${overall}</div>
       <div><b>Overall level</b><div class="muted small">Total ${total} of ${skills.length * LV_MAX} · tap a skill for details</div></div></div>
+    ${S.lvHist ? `<div class="lv-hist">${lvRangeSeg()}${lvChart(lvHistory(skills).overall)}</div>` : ''}
+    <button class="lv-hist-btn" data-a="lv-hist">${S.lvHist ? 'Hide history' : 'Show history'}</button>
     ${groups.map(g => `<div class="lbl">${g}</div><div class="lv-grid">${skills.filter(s => s.group === g).map(tile).join('')}</div>`).join('')}
-    ${open ? lvDetail(open, st.shown[open.k] || 1) : ''}
+    ${open ? lvDetail(open, st.shown[open.k] || 1, skills) : ''}
   </div>`;
 }
-function lvDetail(s, lv) {
+function lvDetail(s, lv, skills) {
   const ref = LV_LIFTS[s.k] ? ` on ${esc(lvLift(s))}` : '';
   const now = LV_LIFTS[s.k] && s.best ? `Your best single ${esc(lvLift(s))} set lately: ${esc(s.best.set.replace('×', ' × '))}. That's about ${lvFmt(s, s.v)}${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
     : s.k === 'cardio' && s.best ? `Best recent pace ${lvFmt(s, s.v)} (${esc(s.best.name)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
@@ -4310,7 +4339,8 @@ function lvDetail(s, lv) {
   return `<div class="lv-detail"><b>${esc(s.name)} · level ${lv}</b>
     <p>${now}</p>
     <p class="muted small">Level 1 = ${lvFmt(s, s.base)} (your lowest on record). Level 60 = ${lvFmt(s, s.goal)}${ref}.${lv < LV_MAX ? ` Level ${lv + 1} at ${lvFmt(s, lvValueFor(s, lv + 1))}.` : ''}</p>
-    <p class="muted small">${esc(LV_TRY[s.k] && s.k !== 'weight' ? LV_TRY[s.k] : lvTry(s))}</p></div>`;
+    <p class="muted small">${esc(LV_TRY[s.k] && s.k !== 'weight' ? LV_TRY[s.k] : lvTry(s))}</p>
+    ${skills ? `<div class="lv-hist">${S.lvHist ? '' : lvRangeSeg()}${lvChart(lvHistory(skills).by[s.k] || [])}</div>` : ''}</div>`;
 }
 const levelPill = () => (S.settings.levels && S.settings.levels.shown ? `<button class="streak-pill lv-pill" data-a="tab" data-t="stats" aria-label="Overall level">Lv ${lvOverall(S.settings.levels.shown)}</button>` : '');
 
@@ -4987,6 +5017,8 @@ const ACT = {
     lvNext();
   },
   'lv-info': d => { S.lvOpen = S.lvOpen === d.k ? null : d.k; render(); },
+  'lv-hist': () => { S.lvHist = !S.lvHist; render(); },
+  'lv-range': d => { S.lvRange = +d.v; render(); },
   'coach-ok': d => { const c = S.coachLog.find(x => x.id === d.k); if (c) { c.seen = true; saveCoachLog(); } render(); },
   'coach-undo': async d => {
     const c = S.coachLog.find(x => x.id === d.k);
