@@ -484,7 +484,6 @@ body.flash::after {
 .center { text-align: center; }
 
 /* v1.7: trainer picks */
-.warmup { color: var(--mut); font-size: 14px; margin: 2px 2px 8px; }
 .rir { display: grid; gap: 6px; margin: 8px 0 4px; padding: 10px; border-radius: 14px; background: var(--s2); }
 .rir > span { color: var(--mut); font-size: 13px; font-weight: 650; }
 .rir .seg { background: var(--s1); }

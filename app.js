@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.11.0';
+const APP_VERSION = '2.12.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -134,11 +134,12 @@ function classify(x) {
 }
 // Add about 5% (4% for upper-body compounds), never less than one step, rounded to steps you can load.
 function jumpFor(t, w) {
+  if (t.stack) return 1;
   const step = t.inc || UP;
   const pct = t.kind !== 'iso' && t.body === 'upper' ? 0.04 : 0.05;
   return Math.max(step, roundTo((+w || 0) * pct, step));
 }
-const PROGRAM_V = 4;
+const PROGRAM_V = 5;
 // Brings an older saved program up to date with the trainer review (Nov 2026): wider ranges for
 // small lifts, a quad lift and an overhead press on Wednesday, and a real abs exercise. Only touches
 // exercises that still match the original program, so your own edits stay.
@@ -153,6 +154,7 @@ function migrateProgram(p) {
     })));
   }
   if (v0 < 4) migrateV4(p);
+  if (v0 < 5) migrateV5(p);
   p.v = PROGRAM_V;
   return true;
 }
@@ -178,6 +180,52 @@ function migrateV4(p) {
     if (!gs.some(g => g.some(x => /hip thrust|glute bridge/i.test(x.name)))) {
       const at = gs.findIndex(g => g.some(x => /split squat|lunge|squat|leg press/i.test(x.name)));
       gs.splice(at >= 0 ? at + 1 : gs.length, 0, [ex('Hip thrust', 3, 12, 15, LO)]);
+    }
+  }
+}
+// v5 (Nov 2026 trainer audit): your priorities get more direct work. Side delts train all three days,
+// Monday's heavy press goes low-incline for the upper chest, Monday's leg press goes normal stance for
+// the quads, and rear delts and a seated hamstring curl join Monday. Friday trims to 10 lifts and
+// Wednesday's hip abduction moves to Friday to pay for it. Only exercises that still match the v4 plan change.
+function migrateV5(p) {
+  const day = d => (p.days[d] && p.days[d].type === 'strength' ? p.days[d] : null);
+  const is = (x, name, sets, min, max) => !!x && keyOf(x.name) === keyOf(name) && x.sets === sets && x.min === min && x.max === max;
+  const clean = d => { d.groups = d.groups.filter(g => g.length); };
+  const mon = day('mon'), wed = day('wed'), fri = day('fri');
+  let monHam = false;
+  if (mon) {
+    const gs = mon.groups = mon.groups || [];
+    gs.forEach(g => g.forEach(x => {
+      if (is(x, 'Bench press', 3, 4, 6)) { x.name = 'Low-incline bench press'; x.note = x.note || 'Bench at 15–30°'; }
+      if (is(x, 'Leg press', 2, 10, 10)) { x.sets = 3; x.max = 12; if (/feet high/i.test(x.note || '')) x.note = ''; }
+    }));
+    const lat = gs.findIndex(g => g.length === 1 && is(g[0], 'Lateral raise', 3, 12, 20));
+    if (lat >= 0) gs[lat].push(ex('Reverse pec deck', 3, 15, 20, UP));
+    monHam = gs.some(g => g.some(x => /hamstring|leg curl/i.test(x.name)));
+    if (!monHam && fri) { gs.push([ex('Hamstring curl', 3, 10, 12, LO, { note: 'Seated' })]); monHam = true; }
+  }
+  let abd = null;
+  if (wed) {
+    const gs = wed.groups = wed.groups || [];
+    gs.forEach(g => g.forEach(x => { if (is(x, 'Romanian deadlift', 3, 8, 8)) { x.min = 6; x.max = 10; } }));
+    const c = gs.findIndex(g => g.length === 1 && is(g[0], 'Calf raise', 3, 12, 20));
+    if (c >= 0) gs[c].push(ex('Cable lateral raise', 3, 12, 20, UP));
+    else if (!gs.some(g => g.some(x => /lateral raise/i.test(x.name)))) gs.push([ex('Cable lateral raise', 3, 12, 20, UP)]);
+    const h = gs.findIndex(g => g.length === 1 && is(g[0], 'Hip abduction', 3, 12, 15));
+    if (h >= 0 && fri) abd = gs.splice(h, 1)[0];
+    clean(wed);
+  }
+  if (fri) {
+    const gs = fri.groups = fri.groups || [];
+    const drop = (name, sets, min, max) => gs.forEach((g, i) => { gs[i] = g.filter(x => !is(x, name, sets, min, max)); });
+    drop('Cable crossover', 2, 15, 20);
+    if (monHam) drop('Hamstring curl', 2, 12, 15);
+    drop('Pushdown', 3, 12, 15);
+    gs.forEach(g => g.forEach(x => { if (is(x, 'Lateral raise', 2, 12, 20) || is(x, 'Face pull', 2, 15, 20)) x.sets = 3; }));
+    clean(fri);
+    if (abd) {
+      const at = fri.groups.findIndex(g => g.some(x => /calf/i.test(x.name)));
+      fri.groups.splice(at >= 0 ? at : fri.groups.length, 0, abd);
     }
   }
 }
@@ -207,24 +255,24 @@ function defaultProgram() {
     v: PROGRAM_V,
     days: {
       mon: { label: 'Heavy full body', type: 'strength', groups: [
-        [ex('Bench press', 3, 4, 6, UP)],
+        [ex('Low-incline bench press', 3, 4, 6, UP, { note: 'Bench at 15–30°' })],
         [ex('Hip thrust', 3, 6, 8, LO)],
         [ex('Lat pulldown', 3, 6, 8, UP)],
         [ex('Cable fly', 2, 10, 12, UP)],
-        [ex('Leg press', 2, 10, 10, LO, { note: 'Feet high' })],
+        [ex('Leg press', 3, 10, 12, LO)],
         [ex('Bar curl', 3, 8, 12, UP), ex('Rope pushdown', 3, 8, 12, UP)],
-        [ex('Lateral raise', 3, 12, 20, UP)],
+        [ex('Lateral raise', 3, 12, 20, UP), ex('Reverse pec deck', 3, 15, 20, UP)],
+        [ex('Hamstring curl', 3, 10, 12, LO, { note: 'Seated' })],
       ] },
       tue: { label: 'Yoga + walk/run', type: 'cardio' },
       wed: { label: 'Medium full body', type: 'strength', groups: [
         [ex('Incline DB press', 3, 8, 10, UP)],
         [ex('Leg press', 3, 8, 12, LO)],
-        [ex('Romanian deadlift', 3, 8, 8, LO)],
+        [ex('Romanian deadlift', 3, 6, 10, LO)],
         [ex('Row', 3, 8, 10, UP)],
         [ex('Seated DB shoulder press', 3, 8, 10, UP)],
-        [ex('Hip abduction', 3, 12, 15, LO)],
         [ex('DB curl', 3, 10, 12, UP), ex('Overhead triceps extension', 3, 10, 12, UP)],
-        [ex('Calf raise', 3, 12, 20, LO)],
+        [ex('Calf raise', 3, 12, 20, LO), ex('Cable lateral raise', 3, 12, 20, UP)],
         [ex('Cable crunch', 3, 10, 15, UP), ex('Pallof press', 2, 10, 12, UP, { note: 'Per side' })],
       ] },
       thu: { label: 'Yoga + easy walk/run', type: 'cardio' },
@@ -233,10 +281,9 @@ function defaultProgram() {
         [ex('Bulgarian split squat', 3, 10, 12, LO, { note: 'Per leg' })],
         [ex('Hip thrust', 3, 12, 15, LO)],
         [ex('Pull-ups', 3, null, null, UP, { note: 'Max reps' })],
-        [ex('Cable crossover', 2, 15, 20, UP)],
-        [ex('Hamstring curl', 2, 12, 15, LO)],
-        [ex('Hammer curl', 3, 12, 15, UP), ex('Pushdown', 3, 12, 15, UP)],
-        [ex('Lateral raise', 2, 12, 20, UP), ex('Face pull', 2, 15, 20, UP)],
+        [ex('Hammer curl', 3, 12, 15, UP)],
+        [ex('Lateral raise', 3, 12, 20, UP), ex('Face pull', 3, 15, 20, UP)],
+        [ex('Hip abduction', 3, 12, 15, LO)],
         [ex('Calf raise', 3, 12, 20, LO)],
         [ex("Farmer's carry", 3, 40, 60, UP, { unit: 'steps' })],
       ] },
@@ -278,9 +325,11 @@ async function loadState() {
   S.settings.trainer = { ...DEFAULT_SETTINGS.trainer, ...((kv.settings || {}).trainer || {}) };
   S.coachLog = kv.coachLog || [];
   if (!S.settings.streakRuleFrom) { S.settings.streakRuleFrom = todayStr(); await saveSettings(); }
+  // Trainer check-up (Nov 2026): lean bulk aimed faster than the slow gain you asked for, so it moves to Slow gain once.
+  if (!S.settings.goalV) { if (S.settings.goal === 'bulk') S.settings.goal = 'slow'; S.settings.goalV = 1; await saveSettings(); }
   S.foods = kv.foods || [];
   if (!kv.program || migrated) await saveProgram();
-  if (migrated && kv.program) S.notice = oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
+  if (migrated && kv.program) S.notice = oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
   S.workouts = await DB.all('workouts');
   // 1.9 saved imported activity-only days under Sunday.
   const moved = S.workouts.filter(w => w.imported && w.dayKey === 'sun' && w.type === 'rest');
@@ -344,6 +393,25 @@ const ACT_PLAN = { label: 'Activity', type: 'rest' };
 // "Take today as a rest day": settings.dayMoves maps a date to the day plan it uses instead of its
 // weekday's ('off' = rest). Today's lift moves to tomorrow, and each lift after it moves back a day
 // until a rest day takes it in.
+// What "Take today as a rest day" would do: today goes off and its lift moves to tomorrow, pushing later
+// lifts back a day until a rest day takes one in. A lift never moves into next week or onto the day
+// right before next week's first lift (no back-to-back full-body days); it's skipped instead.
+function restPlan(today) {
+  const cur = dayMoves(), m = { ...cur }, prev = {}, key = planKeyOn(today), wk = weekStart(today);
+  const set = (d, k) => { prev[d] = d in cur ? cur[d] : null; if (k === dayKeyOf(d)) delete m[d]; else m[d] = k; };
+  const blocked = d => weekStart(d) !== wk || (weekStart(addDays(d, 1)) !== wk && (planOf(planKeyOn(addDays(d, 1))) || {}).type === 'strength');
+  set(today, 'off');
+  let carry = key, to = null;
+  for (let i = 1; i <= 7; i++) {
+    const d = addDays(today, i), was = planKeyOn(d);
+    if (blocked(d)) break;
+    if (i === 1) to = d;
+    set(d, carry);
+    if ((planOf(was) || {}).type === 'rest') break;
+    carry = was;
+  }
+  return { m, prev, key, to };
+}
 const OFF_PLAN = { label: 'Rest day', type: 'rest' };
 const dayMoves = () => S.settings.dayMoves || {};
 const planKeyOn = date => dayMoves()[date] || dayKeyOf(date);
@@ -376,7 +444,7 @@ function recentPerf(key, w, n) {
     if (o.id === w.id) continue;
     if (o.date > w.date || (o.date === w.date && o.createdAt > w.createdAt)) continue;
     const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length);
-    if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) || offDay(o), note: liftNote(o, e.name), t: e.target ? { min: e.target.min, max: e.target.max } : null });
+    if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) || offDay(o), note: liftNote(o, e.name), t: e.target ? { min: e.target.min, max: e.target.max } : null, grace: (e.coach && e.coach.grace) || 0 });
   }
   return out;
 }
@@ -411,8 +479,11 @@ function coachPlan(t, recent, opts = {}) {
   }
   const lo = t.min ?? t.max, hi = t.max ?? t.min;
   const holdWhy = opts.energy === 'low' ? (opts.sick ? "you're sick" : "energy's low") : opts.tired || (opts.noted === 'lift-pain' ? 'it hurt last time' : opts.noted === 'lift-hard' ? 'it felt hard last time' : '');
-  // Sessions logged on a low-energy day don't count as misses.
-  const short = p => !p.easy && (p.sets.length < t.sets || p.sets.some(x => +x.r < lo));
+  // Sessions logged on a low-energy day don't count as misses. Right after a big jump (p.grace), a few
+  // reps under the range is expected (about 3, and a rep less on later sets), so that isn't a miss either.
+  const short = p => !p.easy && (p.sets.length < t.sets || p.sets.some(x => +x.r < lo - (p.grace ? 4 : 0)));
+  const total = p => sum(p.sets.map(x => +x.r || 0));
+  const bestE = p => Math.max(0, ...p.sets.filter(x => +x.w).map(x => e1rm(+x.w, Math.min(+x.r || 0, 20))));
 
   if (new Set(lw).size > 1) {
     const ws = [], rr = [];
@@ -437,27 +508,41 @@ function coachPlan(t, recent, opts = {}) {
     if (jumpFor(t, top) / top > 0.1 && !reps.every(r => r >= hi + 2)) {
       return plan('reps', prev, fill(hi + 2), `${round2(top + jumpFor(t, top))} lb is a big step, so earn it: ${hi + 2} on every set first.`);
     }
-    const lastRir = last.sets[last.sets.length - 1].rir;
-    const easy = (lastRir != null && lastRir >= 3) || opts.noted === 'lift-easy';
+    const easy = opts.noted === 'lift-easy';
     const w = round2(top + jumpFor(t, top) * (easy ? 2 : 1));
-    return plan('up', fill(w), fill(lo), easy ? `${hi} on every set ${opts.noted === 'lift-easy' ? 'and you said it felt easy' : 'with reps to spare'}. Bigger jump: ${w} lb, aim for ${lo}+.` : `${hi} on every set last time. Up to ${w} lb, aim for ${lo}+.`);
+    // A jump over 10% (25 → 30 lb dumbbells) won't allow the bottom of the range yet, so aim for what the
+    // estimated max says you can do, and give it a few sessions to climb back into the range.
+    const aim = (w - top) / top > 0.1 ? Math.max(1, Math.min(lo, Math.round((e1rm(top, Math.min(Math.min(...reps), 20)) / w - 1) * 30))) : lo;
+    if (aim < lo) return { ...plan('up', fill(w), fill(aim), `${hi} on every set. ${w} lb is a big step, so aim for ${aim} and climb from there. Under ${lo} is fine for a few sessions.`), grace: 3 };
+    return plan('up', fill(w), fill(lo), easy ? `${hi} on every set and you said it felt easy. Bigger jump: ${w} lb, aim for ${lo}+.` : `${hi}on every set last time. Up to ${w} lb, aim for ${lo}+.`);
   }
   if (short(last)) {
     const p2 = recent[1];
     const prevTop = p2 ? Math.max(...p2.sets.map(s => +s.w || 0)) : 0;
-    if (top && p2 && short(p2) && prevTop >= top && daysBetween(p2.date, last.date) <= 21) {
+    // Two short sessions only mean a drop when the second wasn't any better (more reps or a higher estimated max).
+    const better = p2 && (bestE(last) > bestE(p2) + 0.01 || (top === prevTop && total(last) > total(p2)));
+    if (top && p2 && short(p2) && prevTop >= top && daysBetween(p2.date, last.date) <= 21 && !better) {
       const step = t.inc || UP;
       const w = Math.max(step, Math.min(top - step, roundTo(top * 0.9, step)));
       return plan('down', fill(w), fill(hi), `Two tough ones in a row. ${w} lb today, build back from here.`);
     }
-    return plan('hold', prev, reps.map(r => Math.max(r, lo)), `Same ${wTxt(top)}. Go for ${lo} on every set.`);
+    return { ...plan('hold', prev, reps.map(r => (last.grace ? Math.min(hi, r + 1) : Math.max(r, lo))), better ? `Short of ${lo}, but better than last time. Same ${wTxt(top)}, go for ${lo} on every set.` : `Same ${wTxt(top)}. Go for ${lo} on every set.`), grace: last.grace ? last.grace - 1 : 0 };
   }
   if (opts.energy === 'low') return plan('hold', prev, reps, `${opts.sick ? 'Sick day' : 'Low energy'}, so just match last time at ${wTxt(top)}.`);
   if (opts.noted === 'lift-pain' || opts.noted === 'lift-hard') return plan('hold', prev, reps, `Match last time at ${wTxt(top)}, since ${opts.noted === 'lift-pain' ? 'it hurt last time' : 'it felt hard last time'}.`);
   if (opts.noted === 'lift-easy') {
     return plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 2))), `You said it felt easy. Same weight, two more reps a set (top is ${hi}).`);
   }
-  if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi)) return plan('hold', prev, reps, `Last set was all-out. Match ${wTxt(top)} before adding reps.`);
+  // Still climbing into the range after a big jump: one more rep a set, from wherever you are.
+  if (last.grace && last.sets.some(x => +x.r < lo)) {
+    return { ...plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, at(reps, k) + 1)), `Settling in at ${wTxt(top)} after the jump. One more rep a set.`), grace: last.grace - 1 };
+  }
+  // An all-out last set still gets one more rep next time (training close to failure builds muscle),
+  // unless your reps dipped from the time before at the same weight.
+  const p2 = recent[1];
+  if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi) && p2 && Math.max(...p2.sets.map(s => +s.w || 0)) === top && total(last) < total(p2)) {
+    return plan('hold', prev, reps, `Last set was all-out and reps dipped. Match ${wTxt(top)} before adding reps.`);
+  }
   return plan('reps', prev,
     Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 1))),
     `Same weight, one more rep a set (top is ${hi}).`);
@@ -466,14 +551,17 @@ function coachPlan(t, recent, opts = {}) {
 // Tailor the rest of today's sets to how this one went. Reps usually drop a little from set to set,
 // so only raise after a big early set, and only lower after a clear miss (2 short, or short on set 1).
 function adjustRest(w, e, j) {
-  const t = targetOf(e), s = e.sets[j];
+  const t = effTarget(e), s = e.sets[j];
   if (t.min == null && t.max == null) return null;
-  // Easy days (low energy, deload) aim 2 reps lower on purpose, so judge sets against that.
-  const easy = lowDay(w.date) || !!w.deload, cut = easy ? 2 : 0;
-  const lo = Math.max(1, (t.min ?? t.max) - cut), hi = (t.max ?? t.min) - cut, step = t.inc || UP, w0 = +s.w;
+  // Easy days (low energy, deload) aim 2 reps lower on purpose, so judge sets against that. Right after
+  // a big jump, a few reps under the range is expected.
+  const easy = lowDay(w.date) || !!w.deload, cut = easy ? 2 : (e.coach && e.coach.grace ? 4 : 0);
+  const lo = Math.max(1, (t.min ?? t.max) - cut), hi = (t.max ?? t.min) - (easy ? 2 : 0), step = t.inc || UP, w0 = +s.w;
   const rest = e.sets.filter((x, k) => k > j && !x.done && +x.w === w0);
   if (!rest.length || !w0) return null;
-  if (+s.r >= hi + 2 && j <= 1 && !easy) {
+  // Lifts that bother you (and shoulder care) never go up mid-workout.
+  const careful = REHAB_WORDS.test(e.name) || !!careOf(e.name);
+  if (+s.r >= hi + 2 && j <= 1 && !easy && !careful) {
     rest.forEach(x => { x.w = x.pw = round2(w0 + step); x.r = x.pr = lo; });
     return { t: `Strong set. Next one +${step} lb.`, tone: 'up' };
   }
@@ -499,11 +587,32 @@ function sessionExercise(x, group, w) {
 // of normal volume still keeps your gains).
 // Deload weeks: half the sets at last time's weights. Plans build on your last regular sessions,
 // so low-energy days and deloads never drag the numbers down.
+// A lift you've never logged starts from a close cousin you have: low-incline bench at about 85% of
+// your flat bench (a little less if that bench was a while ago).
+const FIRST_FROM = [[/incline (bench|barbell)/i, 'Bench press', 0.85]];
+function firstFrom(e, t, w) {
+  const f = FIRST_FROM.find(([re]) => re.test(e.name));
+  if (!f || t.min == null) return null;
+  const h = recentPerf(keyOf(f[1]), w, 1)[0];
+  const best = h ? Math.max(0, ...h.sets.filter(x => +x.w).map(x => e1rm(+x.w, Math.min(+x.r || 0, 20)))) : 0;
+  if (!best) return null;
+  const step = t.inc || UP, aim = Math.max(t.min, (t.max ?? t.min) - 1), pct = f[2] * (daysBetween(h.date, w.date) >= 21 ? 0.9 : 1);
+  const wNew = Math.max(step, Math.floor(best * pct / (1 + aim / 30) / step) * step), fill = v => Array(t.sets).fill(v);
+  return { kind: 'hold', ws: fill(wNew), w: wNew, from: 0, prev: null, reps: fill(aim), note: `First time: ${wNew} lb for ${aim}, about ${Math.round(f[2] * 100)}% of your ${f[1].toLowerCase()}. Adjust after the first set if it's off.` };
+}
+// Weight-stack machines logged by pin number ("Pec fly (stack #)", or "stack" in the lift's note) go up one pin at a time.
+const isStack = (name, note) => /\(stack ?#?\)/i.test(name || '') || /\bstack\b/i.test(note || '');
+// The target a lift is really aiming for today: shoulder care stays at 10 to 15 reps, lifts that cause
+// pressure move to lighter sets of 10 to 15, and stack machines step one pin.
+function effTarget(e) {
+  const base = targetOf(e);
+  let t = REHAB_WORDS.test(e.name) || careOf(e.name) === 'pressure' ? { ...base, min: Math.max(base.min ?? 10, 10), max: Math.max(base.max ?? 15, 15) } : base;
+  if (isStack(e.name, base.note)) t = { ...t, inc: 1, stack: true };
+  return t;
+}
 function fillSets(e, w) {
   const rehab = REHAB_WORDS.test(e.name), care = careOf(e.name);
-  const base = targetOf(e);
-  // Shoulder care stays at 10 to 15 reps; lifts that cause pressure move to lighter sets of 10 to 15.
-  const t = rehab || care === 'pressure' ? { ...base, min: Math.max(base.min ?? 10, 10), max: Math.max(base.max ?? 15, 15) } : base;
+  const base = targetOf(e), t = effTarget(e);
   const low = !rehab && lowDay(w.date), deload = !rehab && !!w.deload;
   // Easy-day sessions (low energy, deload, tired or sick in your notes) only count if you still hit every set.
   const full = p => p.sets.length >= t.sets && p.sets.every(x => +x.r >= (t.min ?? t.max ?? 0));
@@ -511,39 +620,42 @@ function fillSets(e, w) {
   const recent = pick.recent, real = recent.filter(p => !p.easy || full(p));
   const tired = sleepShort(w.date) ? 'you slept under 6 hours' : t.body === 'lower' ? legsTired(w.date) : '';
   const short2 = !rehab && energyFor(w.date) !== 'low' && twoShortNights(w.date) ? "you've had two short nights" : '';
+  const helps = soreHelpers(e.name, w.date);
+  // Every reason to hold off weight jumps today, in one place, so plans and comebacks treat them the same.
+  const noJump = rehab ? '' : tired || short2 || (deload ? "it's a deload week" : '') || (helps ? `your ${helps} ${/s$| and /.test(helps) ? 'are' : 'is'} sore` : '');
   // Never reach back past a break for the last normal session: build on the easy one instead (it isn't a miss).
   const stale = real.length && recent.length && daysBetween(real[0].date, recent[0].date) >= 21;
   const basis = real.length && !stale ? real.slice(0, 2) : recent.slice(0, 2), noted = basis[0] && basis[0].note;
-  let plan = coachPlan(t, basis, { energy: rehab ? null : energyFor(w.date) || (sickNoted(w.date) ? 'low' : null), sick: !rehab && !energyFor(w.date) && !!sickNoted(w.date), tired: rehab ? '' : tired || short2 || (deload ? "it's a deload week" : ''), noted: noted && noted.k });
+  let plan = coachPlan(t, basis, { energy: rehab ? null : energyFor(w.date) || (sickNoted(w.date) ? 'low' : null), sick: !rehab && !energyFor(w.date) && !!sickNoted(w.date), tired: noJump, noted: noted && noted.k });
   if (pick.conv) plan = pick.conv;
   let cb = rehab ? null : comeback(t, recent, w.date);
   // Building back after a break waits a session when today's an easy day or your note said hard or pain.
-  const pause = cb && cb.kind === 'up' && (low ? 'today is an easy day' : [noted, recent[0] && recent[0].note].some(x => x && (x.k === 'lift-hard' || x.k === 'lift-pain')) ? 'your note said it was rough' : '');
+  const pause = cb && cb.kind === 'up' && (low ? 'today is an easy day' : noJump || [noted, recent[0] && recent[0].note].some(x => x && (x.k === 'lift-hard' || x.k === 'lift-pain')) ? 'your note said it was rough' : '');
   if (pause) cb = { ...cb, kind: 'hold', ws: cb.ws.map(() => cb.from), note: `Same ${cb.from} lb, since ${pause}. Building back picks up next time.` };
   if (cb) plan = { ...(plan || { prev: null }), kind: cb.kind, ws: cb.ws, w: Math.max(...cb.ws), from: cb.from, reps: cb.reps, note: cb.note };
   else if (plan && deload) plan = { ...plan, kind: 'hold', ws: plan.prev, w: plan.from, reps: plan.prev.map(() => t.min ?? t.max ?? 8), note: '' };
-  if (plan && (care || rehab) && !cb) {
+  if (plan && (care || rehab)) {
     const last = (real[0] || recent[0]).sets, top = Math.max(...last.map(s => +s.w || 0)), step = t.inc || UP;
     if (care === 'pressure' && top && Math.max(...last.map(s => +s.r)) < 10) {
       // Moving to lighter sets: about 15% less so 10 reps feel smooth.
-      const lw = Math.max(step, roundTo(top * 0.85, step));
+      const lw = Math.min(plan.w || Infinity, Math.max(step, roundTo(top * 0.85, step)));
       plan = { ...plan, kind: 'down', ws: plan.ws.map(() => lw), w: lw, reps: plan.reps.map(() => 10), note: `${lw} lb today so 10 to 15 reps feel smooth.` };
     } else if (plan.w > top + step) {
       // No big jumps on a lift that bothers you: one step at a time.
       plan = { ...plan, ws: plan.ws.map(x => Math.min(x, top + step)), w: Math.min(plan.w, top + step), note: `Up one step to ${round2(top + step)} lb, aim for ${t.min ?? t.max}+.` };
     }
   }
-  e.coach = plan ? { kind: plan.kind, note: plan.note, from: plan.from, w: plan.w, prev: plan.prev } : null;
+  if (!plan && !recent.length && !rehab) plan = firstFrom(e, t, w);
+  e.coach = plan ? { kind: plan.kind, note: plan.note, from: plan.from, w: plan.w, prev: plan.prev, ...(plan.grace > 0 ? { grace: plan.grace } : {}) } : null;
   const sets = cb ? cb.n : t.sets;
-  const extra = deload && !cb ? `Deload: ${Math.ceil(sets / 2) === 1 ? '1 set' : `${Math.ceil(sets / 2)} sets`}${plan ? " at last time's weights" : ''}, about 3 left in the tank.`
+  const extra = deload ? `Deload: ${Math.ceil(sets / 2) === 1 ? '1 set' : `${Math.ceil(sets / 2)} sets`}${plan ? " at last time's weights" : ''}, about 3 left in the tank.`
     : low ? '2 sets today. Stop each with 2 or 3 left in the tank.' : '';
-  if (extra && (!plan || (deload && !cb))) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
-  const helps = soreHelpers(e.name, w.date);
+  if (extra && (!plan || deload)) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
   const noteCue = !noted ? '' : noted.k === 'lift-pain' ? 'Keep it light, stop if it hurts.'
     : noted.k === 'lift-cramp' && care !== 'cramp' ? CARE_CUES.cramp : '';
   const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', noteCue, helps ? `Sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here. Go lighter, stop if it pulls.` : ''].filter(Boolean).join(' ');
   if (cue) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${cue}`.trim() } : { kind: 'hold', note: cue, from: 0, w: 0, prev: null };
-  const n = deload && !cb ? Math.ceil(sets / 2) : low ? Math.min(2, sets) : sets;
+  const n = deload ? Math.ceil(sets / 2) : low ? Math.min(2, sets) : sets;
   const done = e.sets.filter(s => s.done);
   e.sets = done.concat(Array.from({ length: Math.max(0, n - done.length) }, (_, m) => {
     const k = done.length + m;
@@ -581,22 +693,34 @@ function rangeBasis(base, t, all) {
 function comeback(t, recent, date) {
   const last = recent[0];
   if (!last || (t.min == null && t.max == null)) return null;
-  const lo = t.min ?? t.max, step = t.inc || UP;
+  const lo = t.min ?? t.max, hi = t.max ?? t.min, step = t.inc || UP;
   const topOf = p => Math.max(...p.sets.map(s => +s.w || 0));
+  // A session's weight in today's rep range: as lifted when its reps fit today's range, otherwise
+  // converted with an estimated max (135 × 5 means more than 135 for 10).
+  const atReps = p => {
+    const top = topOf(p);
+    if (!top) return 0;
+    const best = Math.max(...p.sets.filter(s => +s.w === top).map(s => +s.r || 0));
+    if (best >= lo - 1 && best <= hi + 1) return top;
+    const e = Math.max(...p.sets.filter(s => +s.w).map(s => e1rm(+s.w, Math.min(+s.r || 0, 20))));
+    return Math.max(step, Math.floor(e / (1 + lo / 30) / step) * step);
+  };
   const top = topOf(last), gap = daysBetween(last.date, date), wks = Math.round(gap / 7);
   const fill = (v, n = t.sets) => Array(n).fill(v);
   if (gap >= 21) {
     const away = gap > 90 ? `about ${Math.round(gap / 30)} months` : `${wks} weeks`;
     if (!top) return { kind: 'hold', ws: fill(0), reps: fill(lo), n: Math.max(2, t.sets - 1), from: 0, note: `First time in ${away}. Aim for ${lo} and see how it feels.` };
-    if (gap <= 42) return { kind: 'hold', ws: fill(top), reps: fill(lo), n: t.sets, from: top, note: `First time in ${away}. Same ${top} lb, ${lo} reps. Strength holds fine this long.` };
-    const pct = gap > 90 ? 0.7 : 0.85, n = gap > 90 ? 2 : Math.max(2, t.sets - 1);
-    const w = Math.max(step, roundTo(top * pct, step));
-    return { kind: 'down', ws: fill(w, n), reps: fill(lo, n), n, from: top, note: `First time in ${away}, so ${n} sets at ${w} lb (about ${Math.round(pct * 100)}%) to ease in. Builds back to ${t.sets} × ${top} lb from here.` };
+    // Strength mostly holds for a few weeks, then fades: ease in at 90%, 85% after 6 weeks, 70% after 3 months.
+    const base = atReps(last), pct = gap > 90 ? 0.7 : gap > 42 ? 0.85 : 0.9;
+    const n = gap > 90 ? 2 : gap > 42 ? Math.max(2, t.sets - 1) : t.sets;
+    const w = Math.max(step, roundTo(base * pct, step));
+    return { kind: w < top ? 'down' : 'hold', ws: fill(w, n), reps: fill(lo, n), n, from: top,
+      note: `First time in ${away}, so ${n === t.sets ? '' : `${n} sets at `}${w} lb for ${lo} (about ${Math.round(pct * 100)}% of where you left off) to ease in. Builds back to ${base} lb from here.` };
   }
-  // Already back for a session or few: find where the break was and the weight from before it.
+  // Already back for a session or few: find where the break was and the weight from before it, in today's range.
   const k = recent.findIndex((p, i) => i < 4 && recent[i + 1] && daysBetween(recent[i + 1].date, p.date) >= 21);
   if (k < 0 || !top) return null;
-  const oldTop = topOf(recent[k + 1]);
+  const oldTop = atReps(recent[k + 1]);
   if (top >= oldTop || last.sets.length < 2 || last.sets.some(s => +s.r < lo)) return null;
   const w = Math.min(oldTop, round2(top + jumpFor(t, top)));
   return { kind: 'up', ws: fill(w), reps: fill(lo), n: t.sets, from: top, note: `Building back to ${oldTop} lb, a step each session.` };
@@ -647,23 +771,26 @@ function todaySession() {
 }
 const sleepFor = date => (S.body[date] || {}).sleep ?? null;
 const sleepShort = date => sleepFor(date) != null && sleepFor(date) < 6;
-// Two nights of 6 hours or less in a row count like a low-energy day.
-const twoShortNights = date => [date, addDays(date, -1)].every(d => sleepFor(d) != null && sleepFor(d) <= 6);
-const lowDay = date => energyFor(date) === 'low' || twoShortNights(date) || (!energyFor(date) && !!sickNoted(date));
+// Two nights of 5 hours or less in a row count like a low-energy day, unless you check in OK or Great
+// (then it's just no weight jumps). A little lost sleep barely touches strength.
+const twoShortNights = date => [date, addDays(date, -1)].every(d => sleepFor(d) != null && sleepFor(d) < 6);
+const lowDay = date => energyFor(date) === 'low' || (!energyFor(date) && (twoShortNights(date) || !!sickNoted(date)));
 const planKeyFor = date => `${energyFor(date) || ''}|${sleepShort(date) ? 's' : ''}|${twoShortNights(date) ? 't' : ''}|${deloadState(date).active ? 'd' : ''}|${JSON.stringify(S.settings.care || {})}|${soreFor(date).join(',')}|${!energyFor(date) && sickNoted(date) ? 'sick' : ''}`;
 
 // ----- weekly sets per muscle -----
 // Direct work counts as a full set, big helpers as half (a bench set is 1 chest, ½ triceps).
-const MUSCLES = { chest: 'Chest', back: 'Back', shoulders: 'Shoulders', rear: 'Rear delts', biceps: 'Biceps', triceps: 'Triceps', quads: 'Quads', hams: 'Hamstrings', glutes: 'Glutes', calves: 'Calves', abs: 'Abs' };
+// Front and side delts count apart: presses hit the front hard and the sides only a little, so the
+// side delt work you want for width shows on its own.
+const MUSCLES = { chest: 'Chest', back: 'Back', shoulders: 'Front delts', side: 'Side delts', rear: 'Rear delts', biceps: 'Biceps', triceps: 'Triceps', quads: 'Quads', hams: 'Hamstrings', glutes: 'Glutes', calves: 'Calves', abs: 'Abs' };
 // 10 or more weekly sets builds more muscle (ACSM 2026); smaller areas do fine with about 6.
-const MUSCLE_GOAL = { rear: 6, calves: 6, abs: 6 };
+const MUSCLE_GOAL = { shoulders: 6, rear: 6, calves: 6, abs: 6 };
 // Each rule: [names, muscles that count toward weekly sets, light helpers you'll feel but that don't
 // count]. Light helpers only show on the pictures and in "Helps".
 const MUSCLE_RULES = [
   [/wrist curl/i, {}],
   [/side.?(lying )?leg raise|lateral leg raise|clamshell|fire hydrant/i, { glutes: 0.5 }, ['abs']],
   [/cuban|external rot/i, { rear: 1 }, ['shoulders', 'back']],
-  [/face pull|rear delt|reverse fly|pull-?apart/i, { rear: 1 }, ['back']],
+  [/face pull|rear delt|reverse (fly|pec)|pull-?apart/i, { rear: 1 }, ['back']],
   [/front raise/i, { shoulders: 1 }, ['chest']],
   [/mace (360|churn|rotation|twirl|whirl|swing|overhead)/i, { shoulders: 1, back: 0.5, abs: 0.5 }, ['triceps']],
   [/(chair|bench) dips?/i, { triceps: 1, shoulders: 0.5 }, ['chest']],
@@ -673,8 +800,8 @@ const MUSCLE_RULES = [
   [/overhead (triceps|tricep|cable) extension|french press/i, { triceps: 1 }, ['shoulders']],
   [/triceps|pushdown|push-down|skull/i, { triceps: 1 }],
   [/pullover/i, { back: 1 }, ['chest', 'triceps']],
-  [/lateral raise|side raise|square raise|upright row/i, { shoulders: 1 }, ['back']],
-  [/overhead press|shoulder press|military|arnold press|standing (bar |barbell )?press|\bohp\b/i, { shoulders: 1, triceps: 0.5 }, ['chest', 'back']],
+  [/lateral raise|side raise|square raise|upright row/i, { side: 1 }, ['back']],
+  [/overhead press|shoulder press|military|arnold press|standing (bar |barbell )?press|\bohp\b/i, { shoulders: 1, side: 0.5, triceps: 0.5 }, ['chest', 'back']],
   [/pallof|woodchop/i, { abs: 1 }, ['glutes', 'shoulders']],
   [/hanging (knee|leg) raise|leg raise|ab wheel|rollout|flutter kick|mountain climber|v-?up|hollow/i, { abs: 1 }, ['back']],
   [/russian twist|dead ?bug|bird ?dog/i, { abs: 1 }],
@@ -750,10 +877,10 @@ const BODY = {
   },
 };
 BODY.back.sil = BODY.front.sil;
-const BODY_SIDE = { chest: 'front', shoulders: 'front', biceps: 'front', abs: 'front', quads: 'front', back: 'back', rear: 'back', triceps: 'back', glutes: 'back', hams: 'back', calves: 'back' };
+const BODY_SIDE = { chest: 'front', shoulders: 'front', side: 'front', biceps: 'front', abs: 'front', quads: 'front', back: 'back', rear: 'back', triceps: 'back', glutes: 'back', hams: 'back', calves: 'back' };
 const LOWER_M = new Set(['quads', 'hams', 'glutes', 'calves']);
 // Where each muscle sits from top to bottom on the 214-tall body, for zooming a small picture in.
-const MUSCLE_Y = { back: [26, 104], rear: [35, 55], triceps: [52, 73], chest: [37, 61], shoulders: [35, 55], biceps: [52, 73], abs: [61, 101], glutes: [103, 127], hams: [129, 152], quads: [108, 150], calves: [155, 192] };
+const MUSCLE_Y = { back: [26, 104], rear: [35, 55], side: [35, 55], triceps: [52, 73], chest: [37, 61], shoulders: [35, 55], biceps: [52, 73], abs: [61, 101], glutes: [103, 127], hams: [129, 152], quads: [108, 150], calves: [155, 192] };
 // How lit a muscle is: main muscles (worked directly) start dim and glow as sets get checked off;
 // helping muscles do the same, softer. state = { m: { role: 'main' | 'help', p: 0..1 } }
 function muscleOpacity(st, floor = 0) {
@@ -763,6 +890,11 @@ function muscleOpacity(st, floor = 0) {
 // One body view as SVG. key names it so the light-up can animate from where it was last time.
 const bodyLast = {};
 function bodySVG(side, state, key, opts = {}) {
+  // The drawing has one shoulder cap: it shows front and side delts together, the stronger of the two.
+  if (state.side) {
+    const a = state.shoulders, c = state.side;
+    state = { ...state, shoulders: !a ? c : a.role === c.role ? { role: a.role, p: Math.max(a.p, c.p) } : a.role === 'main' ? a : c };
+  }
   const b = BODY[side], vb = opts.vb || '0 0 100 214';
   const seen = {};
   const part = (m, d) => {
@@ -860,7 +992,7 @@ function lightMuscles() {
 // ----- too sore today -----
 // Pick what's sore and today's lifts work around it: lifts aimed at it sit out (until you un-pick it),
 // lifts it only helps with stay but go lighter, and lifts for muscles that are behind this week fill in.
-const SORE_GROUPS = { chest: ['Chest', ['chest']], back: ['Back', ['back']], shoulders: ['Shoulders', ['shoulders', 'rear']], arms: ['Arms', ['biceps', 'triceps']], legs: ['Legs', ['quads', 'hams', 'glutes', 'calves']], core: ['Core', ['abs']] };
+const SORE_GROUPS = { chest: ['Chest', ['chest']], back: ['Back', ['back']], shoulders: ['Shoulders', ['shoulders', 'side', 'rear']], arms: ['Arms', ['biceps', 'triceps']], legs: ['Legs', ['quads', 'hams', 'glutes', 'calves']], core: ['Core', ['abs']] };
 const soreFor = date => ((S.body[date] || {}).sore || []).filter(g => SORE_GROUPS[g]);
 const soreMuscles = date => soreFor(date).flatMap(g => SORE_GROUPS[g][1]);
 const soreHit = (name, ms) => sum(ms.map(m => musclesOf(name)[m] || 0));
@@ -925,17 +1057,28 @@ function applyMakeUp(w) {
   const had = new Set(w.exercises.filter(e => e.makeUp && !started(e)).map(e => e.key));
   w.exercises = w.exercises.filter(e => !e.makeUp || started(e));
   const ws = weekStart(w.date), dropped = new Set(w.dropped || []);
-  const have = new Set(), direct = new Set(), owed = [];
-  const count = name => { have.add(keyOf(name)); Object.entries(musclesOf(name)).forEach(([m, f]) => { if (f >= 1) direct.add(m); }); };
-  w.exercises.forEach(e => count(e.name));
-  S.workouts.filter(o => o.id !== w.id && o.date >= ws && o.date <= w.date).forEach(o => (o.exercises || []).forEach(e => { if (doneSets(e).length) count(e.name); }));
+  // Weekly sets per muscle (direct 1, helpers ½): what this week's plan calls for, and what you've done
+  // plus what's still planned. A lift is owed when one of its muscles would end the week under half.
+  const have = new Set(), got = {}, need = {}, owed = [];
+  const add = (bag, name, n) => Object.entries(musclesOf(name)).forEach(([m, f]) => { bag[m] = (bag[m] || 0) + f * n; });
+  const count = (name, n) => { have.add(keyOf(name)); add(got, name, n); };
+  for (let i = 0; i < 7; i++) { const plan = planOn(addDays(ws, i)); if (plan && plan.type === 'strength') (plan.groups || []).forEach(g => g.forEach(x => add(need, x.name, x.sets || 3))); }
+  w.exercises.forEach(e => count(e.name, e.sets.length));
+  S.workouts.filter(o => o.id !== w.id && o.date >= ws && o.date <= w.date).forEach(o => (o.exercises || []).forEach(e => { if (doneSets(e).length) count(e.name, doneSets(e).length); }));
   const owe = d => { const plan = planOn(d); if (plan && plan.type === 'strength') (plan.groups || []).forEach(g => g.forEach(x => owed.push({ x, d }))); };
   for (let d = ws; d < w.date; d = addDays(d, 1)) {
     if (d < today) { owe(d); continue; }
     const sess = d === today ? todaySession() : (planOn(d) || {}).type === 'strength' ? buildSession(planKeyOn(d), d) : null;
     if (d === today) owe(d);
-    if (sess && sess.type === 'strength') (sess.exercises || []).forEach(e => count(e.name));
+    if (sess && sess.type === 'strength') (sess.exercises || []).forEach(e => count(e.name, e.sets.length));
   }
+  for (let d = addDays(w.date, 1); d < addDays(ws, 7); d = addDays(d, 1)) {
+    const plan = planOn(d);
+    if (plan && plan.type === 'strength') (plan.groups || []).forEach(g => g.forEach(x => count(x.name, x.sets || 3)));
+  }
+  const low = m => (got[m] || 0) < 0.5 * (need[m] || 0);
+  // Keep the day a sensible size: about one extra lift past a full plan day.
+  let total = sum(w.exercises.map(e => e.sets.length));
   const sore = soreMuscles(w.date), seen = new Set(), cands = [];
   owed.forEach(({ x, d }) => {
     const k = keyOf(x.name), main = Object.entries(musclesOf(x.name)).filter(([, f]) => f >= 1).map(([m]) => m);
@@ -947,9 +1090,10 @@ function applyMakeUp(w) {
   let gid = Math.max(0, ...w.exercises.map(e => +e.group || 0)) + 1;
   const added = [];
   cands.forEach(c => {
-    if (added.length >= 2 || c.main.every(m => direct.has(m))) return;
-    c.main.forEach(m => direct.add(m));
-    const e = sessionExercise({ ...c.x, sets: Math.min(c.x.sets || 3, 3) }, gid++, w);
+    const n = Math.min(c.x.sets || 3, 3);
+    if (added.length >= 2 || !c.main.some(low) || total + n > 33) return;
+    add(got, c.x.name, n); total += n;
+    const e = sessionExercise({ ...c.x, sets: n }, gid++, w);
     e.makeUp = fmtDate(c.d, { weekday: 'long' });
     const at = c.iso ? -1 : w.exercises.findIndex(o => !started(o) && targetOf(o).kind === 'iso');
     w.exercises.splice(at < 0 ? w.exercises.length : at, 0, e);
@@ -1010,17 +1154,6 @@ function weeklyVolume(ws) {
 }
 
 // ----- warm-ups, reps left, and deloads -----
-// A quick ramp before the first big lift of the session (and the first big leg lift): about 50% for 8, then 70% for 3.
-function warmupFor(w, i) {
-  const e = w.exercises[i];
-  if (w.date !== todayStr()) return '';
-  const firstOf = f => w.exercises.findIndex(x => targetOf(x).kind !== 'iso' && f(targetOf(x)));
-  if (i !== firstOf(() => true) && i !== firstOf(t => t.body === 'lower')) return '';
-  const wt = +(e.sets.find(x => x.w !== '') || {}).w || 0;
-  if (wt < 60) return '';
-  const step = targetOf(e).inc || UP, r = v => Math.max(step, roundTo(wt * v, step));
-  return `Warm-up (not logged): ${r(0.5)} × 8, then ${r(0.7)} × 3.`;
-}
 // After a set: how many more could you have done? Easy early sets move the next ones up a step.
 // A lighter week after about 7 weeks of steady training, or sooner when 3 or more lifts have stalled.
 function deloadState(date) {
@@ -1046,8 +1179,13 @@ function deloadCalc(date, st) {
     const k = keyOf(x.name);
     if (seen.has(k)) return;
     seen.add(k);
-    const real = recentPerf(k, probe, 6).filter(r => !r.easy).slice(0, 2);
-    if (real.length && real[0].date >= addDays(date, -21) && (coachPlan(classify({ ...x }), real) || {}).kind === 'down') stalls++;
+    // Judge the latest session against its own day's range (heavy Monday and medium Wednesday differ),
+    // with the care and stack rules it was planned with.
+    const all = recentPerf(k, probe, 8).filter(r => !r.easy);
+    if (!all.length || all[0].date < addDays(date, -21)) return;
+    const rt = all[0].t || {}, same = r => !r.t || (r.t.min === rt.min && r.t.max === rt.max);
+    const t = effTarget({ name: x.name, target: { ...x, sets: x.sets, min: rt.min ?? x.min, max: rt.max ?? x.max } });
+    if ((coachPlan(t, all.filter(same).slice(0, 2)) || {}).kind === 'down') stalls++;
   })));
   return { suggest: weeks >= 7 || stalls >= 3, weeks, stalls };
 }
@@ -1297,8 +1435,6 @@ function rirReaction(w, i) {
   const zeros = w.exercises.filter(x => x.sets.length && x.sets[x.sets.length - 1].rir === 0).length;
   if (s.rir === 0 && zeros >= 3 && !st.once.rir0x) { st.once.rir0x = true; return { t: "That's a lot of all-out sets today. 1 or 2 in the tank builds just as well.", tone: 'care', score: 50, why: WHY.rir }; }
   if (s.rir === 0 && !st.once.rir0) { st.once.rir0 = true; return { t: 'All out. Fine sometimes. Stopping 1 or 2 short grows you just as well.', tone: 'care', score: 50, why: WHY.rir }; }
-  if (s.rir === 3 && top) return { t: 'Lots left and every set at the top. Bigger jump next time.', tone: 'good', score: 55 };
-  if (s.rir === 3 && hi != null) return { t: "Lots left. Chase more reps next time, you've got them.", tone: 'good', score: 45 };
   return null;
 }
 // Keeps a closing emoji on the same line as the word before it.
@@ -1402,12 +1538,12 @@ function weighSay(b) {
   const diff = prev ? round1(b.weight - prev.weight) : 0, when = prev && prev.date === addDays(b.date, -1) ? 'yesterday' : prev ? fmtDate(prev.date, { weekday: 'long' }) : '';
   if (Math.abs(diff) >= 1.5) return diff > 0 ? `Up ${diff} since ${when}. That's water and salt, not fat. The 7-day average is what counts.` : `Down ${-diff} since ${when}. Mostly water, so watch the 7-day average.`;
   const t = weightTrend(b.date), goal = S.settings.goal;
-  if (!t || (goal !== 'cut' && goal !== 'bulk')) return null;
+  if (!t || (goal !== 'cut' && goal !== 'bulk' && goal !== 'slow')) return null;
   const avgs = [];
   for (let k = 1; k <= 60; k++) { const x = weightTrend(addDays(b.date, -k)); if (x) avgs.push(x.avg); }
   if (avgs.length < 14) return null;
   if (goal === 'cut' && t.avg < Math.min(...avgs)) return `Lowest 7-day average in ${avgs.length >= 50 ? '2 months' : 'a while'}: ${t.avg} lb. 👌`;
-  if (goal === 'bulk' && t.avg > Math.max(...avgs) && (t.pct == null || t.pct <= GOALS.bulk.hi)) return `Highest 7-day average yet: ${t.avg} lb, at a steady pace. 👌`;
+  if (goal !== 'cut' && t.avg > Math.max(...avgs) && (t.pct == null || t.pct <= GOALS[goal].hi)) return `Highest 7-day average yet: ${t.avg} lb, at a steady pace. 👌`;
   return null;
 }
 
@@ -2014,13 +2150,19 @@ function actMet(a) {
   const min = actMinutes(a);
   if (!(+a.dist > 0) || !min) return a.type === 'run' ? 8 : 3.5;
   const mpm = +a.dist * 1609.34 / min, mph = +a.dist / (min / 60);
-  if (a.type === 'run') return (0.2 * mpm + 3.5) / 3.5;
-  if (mpm <= 100) return (0.1 * mpm + 3.5) / 3.5;
-  const pts = [[3.73, 3.86], [4.2, 5.5], [4.7, 7.0], [5.25, 8.5]];
-  for (let k = 1; k < pts.length; k++) {
-    if (mph <= pts[k][0]) { const [x0, y0] = pts[k - 1], [x1, y1] = pts[k]; return y0 + (y1 - y0) * (mph - x0) / (x1 - x0); }
-  }
-  return 8.5;
+  const run = (0.2 * mpm + 3.5) / 3.5;
+  const walk = () => {
+    if (mpm <= 100) return (0.1 * mpm + 3.5) / 3.5;
+    const pts = [[3.73, 3.86], [4.2, 5.5], [4.7, 7.0], [5.25, 8.5]];
+    for (let k = 1; k < pts.length; k++) {
+      if (mph <= pts[k][0]) { const [x0, y0] = pts[k - 1], [x1, y1] = pts[k]; return y0 + (y1 - y0) * (mph - x0) / (x1 - x0); }
+    }
+    return 8.5;
+  };
+  // A walk + run mix (a pace between 12:30 and 15:00 a mile) blends the two: all walking at 15:00, all
+  // running at 12:30, so calories don't jump at either pace.
+  if (a.mix) { const p = 60 / mph, r = Math.min(1, Math.max(0, (WALK_PACE - p) / (WALK_PACE - RUN_PACE))); return (1 - r) * walk() + r * run; }
+  return a.type === 'run' ? run : walk();
 }
 // Active calories (on top of what you'd burn resting anyway, like a watch shows): (MET − 1) × kg × hours.
 function actKcal(a, date) {
@@ -2287,9 +2429,9 @@ function todaySummary(date, w) {
     <div class="energy"><span>Sleep hrs</span>
       <div class="seg">${SLEEP.map(([v, n]) => `<button class="${(sleepPick(sleepFor(date)) || [])[0] === v ? 'on' : ''}" data-a="sleep" data-v="${v}">${n}</button>`).join('')}</div>
     </div>`}
-    <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How are you feeling? The plan adjusts.'}${twoShortNights(date) ? ' Two short nights: 2 sets a lift, no jumps.' : sleepShort(date) ? ' Under 6 hrs of sleep: no jumps, easier cardio.' : ''}</div>
+    <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How are you feeling? The plan adjusts.'}${twoShortNights(date) ? (en && en !== 'low' ? ' Two short nights: no weight jumps today.' : en ? '' : ' Two short nights: 2 sets a lift, no jumps. Feeling OK? Tap it and you get full sets.') : sleepShort(date) ? ' Under 6 hrs of sleep: no jumps, easier cardio.' : ''}</div>
     ${w.type === 'strength' && !hasWork(w) && isDayKey(w.dayKey) && w.dayKey === planKeyOn(date) && date === todayStr()
-      ? `<button class="rest-today" data-a="rest-today"><b>Take today as a rest day</b><span>Too sore or busy? ${esc(planOf(w.dayKey).label)} moves to tomorrow.</span></button>` : ''}
+      ? `<button class="rest-today" data-a="rest-today"><b>Take today as a rest day</b><span>Too sore or busy? ${esc(planOf(w.dayKey).label)} ${restPlan(w.date).to ? 'moves to tomorrow' : 'is skipped this week, so you never lift two days in a row'}.</span></button>` : ''}
   </div>`;
 }
 
@@ -2501,7 +2643,6 @@ function exBlock(w, i, letter) {
     <div class="ex-last">${lastTxt}</div>
     ${last && last.note && last.note.quote ? `<div class="ex-note">“${esc(last.note.quote)}”<span>Your note, ${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}</span></div>` : ''}
     ${banner}
-    ${warmupFor(w, i) ? `<div class="warmup">${esc(warmupFor(w, i))}</div>` : ''}
     <div class="sets">${rows}</div>
     ${sayHTML(w, i)}
     ${rirAsk(w, i)}
@@ -2558,7 +2699,7 @@ function sessionRest(w) {
   const kcal = acts ? workoutKcal(w) : null;
   const isToday = w.date === todayStr();
   const u = S.settings.restUndo, off = isToday && dayMoves()[w.date] === 'off' && u && u.date === w.date;
-  if (off && !acts) return `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Taking today off. ${esc((planOf(u.key) || {}).label || 'Your lift')} moves to ${esc(fmtDate(u.to, { weekday: 'long' }))}. Recover, eat your protein, sleep well.</div>
+  if (off && !acts) return `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Taking today off. ${esc((planOf(u.key) || {}).label || 'Your lift')} ${u.to ? `moves to ${esc(fmtDate(u.to, { weekday: 'long' }))}` : 'is skipped this week'}. Recover, eat your protein, sleep well.</div>
       <button class="linkbtn" style="margin-top:10px" data-a="rest-undo">Undo, I'll lift today</button></div>
     ${actCards(w)}
     <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Activity</button>
@@ -2830,27 +2971,42 @@ function proteinBasisLb(lb) {
 // A cut raises protein to at least 1 g per lb to protect muscle while eating less (Helms 2014).
 const perLbFor = () => (S.settings.goal === 'cut' ? Math.max(1, S.settings.proteinPerLb) : S.settings.proteinPerLb);
 // Weekly weight change aims, as % of bodyweight: lean bulk slowly, cut 0.5–1% a week (Helms 2014; Iraki 2019).
+// Slow gain (recomp toward size): hold steady or gain up to about 0.3% a week (Helms; Iraki 2019).
 const GOALS = {
+  slow: { name: 'Slow gain', lo: -0.1, hi: 0.3, aim: 'hold steady or gain up to about 0.3% of your weight a week' },
   bulk: { name: 'Lean bulk', lo: 0.1, hi: 0.5, aim: 'gain about 0.25% of your weight a week' },
   maintain: { name: 'Maintain', lo: -0.2, hi: 0.2, aim: 'hold steady' },
   cut: { name: 'Cut', lo: -1, hi: -0.5, aim: 'lose 0.5 to 1% of your weight a week' },
 };
-// 7-day average weight and how far it moved from the week before. Daily weight swings with water and salt.
+// The 7-day average is the number you see. The pace comes from a trend line through the last 3 weeks of
+// weigh-ins (least squares), which daily water swings and an after-breakfast weigh-in barely move.
+// It needs 6 weigh-ins spread over 10+ days.
 function weightTrend(date) {
-  const ins = (from, to) => Object.values(S.body).filter(b => b.weight != null && b.date >= from && b.date <= to).map(b => +b.weight);
-  const cur = ins(addDays(date, -6), date), prev = ins(addDays(date, -13), addDays(date, -7));
+  const from = addDays(date, -20);
+  const pts = Object.values(S.body).filter(b => b.weight != null && b.date >= from && b.date <= date).map(b => [daysBetween(from, b.date), +b.weight]);
+  const cur = pts.filter(([x]) => x >= 14).map(p => p[1]);
   if (cur.length < 2) return null;
   const avg = sum(cur) / cur.length, out = { avg: round1(avg) };
-  if (prev.length >= 2) { const pa = sum(prev) / prev.length; out.rate = round1(avg - pa); out.pct = (avg - pa) / pa * 100; }
+  const xs = pts.map(p => p[0]);
+  if (pts.length >= 6 && Math.max(...xs) - Math.min(...xs) >= 10) {
+    const mx = sum(xs) / xs.length, my = sum(pts.map(p => p[1])) / pts.length;
+    const slope = sum(pts.map(([x, y]) => (x - mx) * (y - my))) / sum(pts.map(([x]) => (x - mx) ** 2));
+    out.rate = round1(slope * 7); out.pct = slope * 7 / avg * 100;
+  }
   return out;
 }
-function goalNote(t) {
+// Calorie advice only after the trend has been off target for two weeks running, so one odd week of
+// weigh-ins never flips it.
+function goalNote(t, date = todayStr()) {
   const g = GOALS[S.settings.goal] || GOALS.maintain, k = S.settings.goal;
-  if (!t || t.pct == null) return `Goal: ${g.name}, ${g.aim}. ${Object.values(S.body).filter(b => b.weight != null).length >= 10 ? 'A few more morning weigh-ins and the trend shows here.' : 'Weigh in most mornings and the trend shows up in two weeks.'}`;
-  if (t.pct > g.hi) return k === 'cut' ? 'Losing slower than planned. About 200 fewer calories a day, or walk a bit more.'
-    : k === 'bulk' ? 'Gaining fast, so some of it is likely fat. About 200 fewer calories a day.' : 'Creeping up. About 200 fewer calories a day.';
-  if (t.pct < g.lo) return k === 'cut' ? 'Losing fast, which can cost muscle. About 200 more calories a day.'
-    : k === 'bulk' ? 'Not gaining yet. Add about 200 calories a day, like a glass of milk.' : 'Drifting down. Add about 200 calories a day.';
+  if (!t || t.pct == null) return `Goal: ${g.name}, ${g.aim}. ${Object.values(S.body).filter(b => b.weight != null).length >= 10 ? 'A few more morning weigh-ins and the trend shows here.' : 'Weigh in most mornings and the trend shows up in about two weeks.'}`;
+  const side = x => (!x || x.pct == null ? 0 : x.pct > g.hi ? 1 : x.pct < g.lo ? -1 : 0);
+  const now = side(t), before = side(weightTrend(addDays(date, -7)));
+  if (now && now !== before) return `${now > 0 ? (k === 'cut' ? 'Losing a bit slower' : 'Gaining a bit faster') : (k === 'cut' ? 'Losing a bit faster' : k === 'slow' || k === 'bulk' ? 'Gaining a bit slower' : 'Drifting down a bit')} than your goal this week. Give it another week before changing anything.`;
+  if (now > 0) return k === 'cut' ? 'Losing slower than planned for two weeks. About 200 fewer calories a day, or walk a bit more.'
+    : k === 'bulk' || k === 'slow' ? 'Gaining faster than planned for two weeks, so some of it is likely fat. About 200 fewer calories a day.' : 'Creeping up for two weeks. About 200 fewer calories a day.';
+  if (now < 0) return k === 'cut' ? 'Losing fast for two weeks, which can cost muscle. About 200 more calories a day.'
+    : k === 'bulk' || k === 'slow' ? 'Losing weight for two weeks. Add about 200 calories a day, like a glass of milk.' : 'Drifting down for two weeks. Add about 200 calories a day.';
   return `On track for your ${g.name.toLowerCase()}. 👌`;
 }
 // Past days keep the target they had, so changing a setting never rewrites how a day went.
@@ -2859,10 +3015,18 @@ function proteinTargetFor(date) {
   if (b && b.target && date < todayStr()) return b.target;
   return liveTarget(date);
 }
+// Protein follows your 7-day average weight, so a daily swing doesn't move it, or your latest weigh-in
+// from the last 3 weeks. Older weigh-ins don't count: the fixed target stands in until you weigh in again.
+function proteinWeight(date) {
+  const ins = Object.values(S.body).filter(b => b.weight != null && b.date <= date && b.date >= addDays(date, -6));
+  if (ins.length) return { lb: sum(ins.map(b => +b.weight)) / ins.length, n: ins.length, on: ins.length === 1 ? ins[0].date : null };
+  const wi = latestWeighIn(date);
+  return wi && wi.date >= addDays(date, -20) ? { lb: +wi.weight, n: 1, on: wi.date } : null;
+}
 function liveTarget(date) {
   if (S.settings.proteinMode === 'auto') {
-    const b = latestWeighIn(date);
-    if (b) return Math.round(proteinBasisLb(b.weight) * perLbFor());
+    const pw = proteinWeight(date);
+    if (pw) return Math.round(proteinBasisLb(pw.lb) * perLbFor());
   }
   return S.settings.proteinTarget;
 }
@@ -2893,10 +3057,10 @@ function viewBody() {
   const prevW = Object.values(S.body).filter(x => x.date < date && x.weight != null).sort((a, c) => c.date.localeCompare(a.date))[0];
   const diff = (b.weight != null && prevW) ? Math.round((b.weight - prevW.weight) * 10) / 10 : null;
   const left = target - b.protein;
-  const wi = latestWeighIn(date);
+  const pw = proteinWeight(date), plb = pw ? Math.round(proteinBasisLb(pw.lb)) : 0;
   const why = date < today && b.target ? `${b.target} g, what it was that day` : S.settings.proteinMode !== 'auto' ? 'Fixed target. Change it in More.'
-    : wi ? `${perLbFor()} g × ${proteinBasisLb(wi.weight)} lb${proteinBasisLb(wi.weight) !== wi.weight ? ' (weight at a BMI of 25 for your height)' : ' bodyweight'}${wi.date !== date ? `, weighed ${esc(fmtDate(wi.date, { month: 'short', day: 'numeric' }))}` : ''}${S.settings.goal === 'cut' ? '. Higher on a cut to protect muscle' : ''}`
-    : 'Log your weight and the target follows it.';
+    : pw ? `${perLbFor()} g × ${plb} lb${proteinBasisLb(pw.lb) !== pw.lb ? ' (weight at a BMI of 25 for your height)' : pw.n > 1 ? ' (your 7-day average weight)' : ' bodyweight'}${pw.on && pw.on !== date ? `, weighed ${esc(fmtDate(pw.on, { month: 'short', day: 'numeric' }))}` : ''}${S.settings.goal === 'cut' ? '. Higher on a cut to protect muscle' : ''}`
+    : Object.values(S.body).some(x => x.weight != null) ? 'No weigh-in in 3 weeks, so this is your fixed target for now. Weigh in and it follows your weight again.' : 'Log your weight and the target follows it.';
   const trend = weightTrend(date);
   const wk7 = Array.from({ length: 7 }, (_, k) => addDays(date, k - 6));
   const creatineDays = wk7.filter(d => (S.body[d] || {}).creatine).length;
@@ -2928,8 +3092,8 @@ function viewBody() {
       <input class="inp" id="bw-inp" inputmode="decimal" value="${b.weight ?? ''}" placeholder="Tap to enter" style="font-size:24px;font-weight:700;min-height:60px">
       ${diff != null ? `<div class="sh-hint">${diff === 0 ? 'Same as' : diff > 0 ? `+${diff} lb since` : `${diff} lb since`} ${esc(fmtDate(prevW.date, { month: 'short', day: 'numeric' }))}</div>` : ''}
       ${trend ? `<div class="trend"><div><b>${trend.avg} lb</b><span>7-day average</span></div>
-        ${trend.rate != null ? `<div><b>${trend.rate > 0 ? '+' : ''}${trend.rate} lb</b><span>vs the week before</span></div>` : ''}</div>` : ''}
-      <div class="sh-hint">${esc(goalNote(trend))} <button class="linkbtn inline" data-a="go-goal">Change goal</button></div>
+        ${trend.rate != null ? `<div><b>${trend.rate > 0 ? '+' : ''}${trend.rate} lb</b><span>a week, 3-week trend</span></div>` : ''}</div>` : ''}
+      <div class="sh-hint">${esc(goalNote(trend, date))} <button class="linkbtn inline" data-a="go-goal">Change goal</button></div>
     </div>
 
     <div class="card">
@@ -3339,7 +3503,7 @@ function viewMore() {
         <button class="toggle ${S.settings.smartRest ? 'on' : ''}" data-a="smart-rest">${S.settings.smartRest ? 'On' : 'Off'}</button>
       </div>
       <div class="rem-row" style="margin-top:14px">
-        <div><b>Ask how hard it was</b><small>After the last set of each lift: could you have done one more rep? A no means it was all-out, so next time you match it before adding reps.</small></div>
+        <div><b>Ask how hard it was</b><small>After the last set of each lift: could you have done one more rep? A no means it was all-out. You still go for one more rep next time, unless your reps dipped, then you match it first.</small></div>
         <button class="toggle ${S.settings.askRir !== false ? 'on' : ''}" data-a="ask-rir">${S.settings.askRir !== false ? 'On' : 'Off'}</button>
       </div>
       <div class="sh-hint">Pops up in the top corner after each set. Partway through a superset round it counts up instead. iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
@@ -3398,7 +3562,7 @@ function goalCard() {
     <div class="card">
       <label class="lbl">Body goal</label>
       <div class="seg">${Object.entries(GOALS).map(([k, x]) => `<button class="${g === k ? 'on' : ''}" data-a="goal" data-v="${k}">${x.name}</button>`).join('')}</div>
-      <div class="sh-hint">${GOALS[g].name}: ${GOALS[g].aim}. The Body tab checks your 7-day average against it${g === 'cut' ? ', and protein goes up to at least 1 g per lb' : ''}.</div>
+      <div class="sh-hint">${GOALS[g].name}: ${GOALS[g].aim}. The Body tab checks your 3-week weight trend against it${g === 'cut' ? ', and protein goes up to at least 1 g per lb' : ''}.</div>
       <div class="rem-row" style="margin-top:14px">
         <div><b>Track creatine</b><small>A daily check-off on the Body tab.</small></div>
         <button class="toggle ${S.settings.creatine ? 'on' : ''}" data-a="creatine-track">${S.settings.creatine ? 'On' : 'Off'}</button>
@@ -3421,7 +3585,7 @@ function proteinCard() {
         <div class="st-inp" style="display:grid;place-items:center">${S.settings.proteinPerLb.toFixed(2)} g</div>
         <button class="st-btn" data-a="set-perlb" data-d="0.05">+</button>
       </div>
-      <div class="sh-hint">${wi ? `Today's target is ${proteinTargetFor(today)} g, from your ${wi.weight} lb weigh-in.` : `Log your weight on the Body tab and the target follows it. Until then it's ${S.settings.proteinTarget} g.`} A common range for lifting is 0.7 to 1 g per pound.</div>`
+      <div class="sh-hint">${proteinWeight(today) ? `Today's target is ${proteinTargetFor(today)} g, from your ${proteinWeight(today).n > 1 ? `7-day average weight (${Math.round(proteinWeight(today).lb)} lb)` : `${Math.round(proteinWeight(today).lb)} lb weigh-in`}.` : wi ? `No weigh-in in 3 weeks, so it's ${S.settings.proteinTarget} g until you weigh in.` : `Log your weight on the Body tab and the target follows it. Until then it's ${S.settings.proteinTarget} g.`} A common range for lifting is 0.7 to 1 g per pound.</div>`
       : `<label class="lbl">Grams per day</label>
       <div class="stepper three">
         <button class="st-btn" data-a="set-prot" data-d="-5">−5</button>
@@ -4010,6 +4174,7 @@ const LV_DB = /\b(db|dumbbells?|kettlebells?|kb|one.?arm|single.?arm)\b/;
 // switching between, say, barbell bench and DB bench doesn't reset you. Dumbbell factors include both hands.
 // Goals are written as weight for 12 reps (what you actually lift); the math runs on the 1-rep estimate.
 const LV_12 = 1 + 12 / 30;
+const LV_V = 2;
 const LV_LIFTS = {
   chest: { ref: 'bench press', goal: 185 * LV_12, no: /\b(dip|fly|flye|shoulder|overhead|triceps|close|pushdown|crossover)/, rules: [
     [n => /incline/.test(n) && LV_DB.test(n), 2.9], [n => LV_DB.test(n) && /bench|chest press|floor press|\bpress\b/.test(n), 2.5],
@@ -4019,8 +4184,8 @@ const LV_LIFTS = {
     [n => /(overhead|military|shoulder) press|^ohp\b/.test(n), 1]] },
   lats: { ref: 'lat pulldown', goal: 165 * LV_12, no: /\b(assist|band|negative|straight.?arm)/, rules: [[n => /pulldown/.test(n), 1], [n => /\b(pull|chin)-up/.test(n), 'bw']] },
   back: { ref: 'row', goal: 170 * LV_12, no: /\b(upright|couch|face|inverted|ring)/, rules: [[n => /\brows?\b/.test(n) && LV_DB.test(n), 2.25], [n => /\brows?\b/.test(n), 1]] },
-  legs: { ref: 'leg press', goal: 360 * LV_12, no: /\b(bodyweight|kettlebell|kb|goblet|split|single|lunge|wide single|curl|extension|calf|jump)/, rules: [
-    [n => /leg press/.test(n), 1], [n => /pendulum|hack|belt squat/.test(n), 1.5], [n => /hex bar squat|trap bar squat/.test(n), 1.4], [n => /\bsquat/.test(n), 1.6]] },
+  legs: { ref: 'leg press', goal: 300 * LV_12, no: /\b(bodyweight|kettlebell|kb|goblet|split|single|lunge|wide single|curl|extension|calf|jump)/, rules: [
+    [n => /leg press/.test(n), 1], [n => /pendulum|hack|belt squat/.test(n), 1.8], [n => /hex bar squat|trap bar squat/.test(n), 1.4], [n => /\bsquat/.test(n), 1.6]] },
   glutes: { ref: 'hip thrust', goal: 300 * LV_12, no: /\b(single|one.?leg|kettlebell|kb)/, rules: [
     [n => /hip thrust|glute bridge/.test(n), 1], [n => /romanian|\brdl\b|stiff/.test(n), 1.45], [n => /(hex|trap) bar deadlift/.test(n), 1], [n => /deadlift/.test(n), 1.1]] },
   arms: { ref: 'barbell curl', goal: 90 * LV_12, no: /\b(leg|hamstring|wrist|mace|nordic)/, rules: [
@@ -4034,7 +4199,7 @@ const LV_SKILLS = [
   { k: 'chestSize', name: 'Chest size', group: 'Size', meas: 'chest', goal: 46 },
   { k: 'armSize', name: 'Arm size', group: 'Size', meas: 'arm', goal: 16 },
   { k: 'thighSize', name: 'Thigh size', group: 'Size', meas: 'thigh', goal: 26 },
-  { k: 'waist', name: 'Waist', group: 'Size', meas: 'waist', goal: 32, lower: true },
+  { k: 'waist', name: 'Waist', group: 'Size', meas: 'waist', goal: 34, lower: true },
   { k: 'weight', name: 'Bodyweight', group: 'Athlete' },
   { k: 'cardio', name: 'Cardio', group: 'Athlete', goal: 60 / 8.5 },
   { k: 'habit', name: 'Consistency', group: 'Athlete', goal: 40 },
@@ -4100,8 +4265,9 @@ function lvSessions() {
       }
     });
     (w.activities || []).forEach(a => {
+      // Each run counts as its 5K-equal pace (Riegel's formula), so a fast mile isn't worth the same as a fast 5K.
       const p = a.type === 'run' && a.style !== 'intervals' && +a.dist >= 1 ? paceOf(a) : null;
-      if (p && p > 4.5 && p < 20) out.cardio.push({ date: w.date, v: 60 / p, name: `${a.dist} mi run`, set: `${fmtPace(p)} /mi` });
+      if (p && p > 4.5 && p < 20) out.cardio.push({ date: w.date, v: 60 / (p * Math.pow(3.107 / +a.dist, 0.06)), name: `${a.dist} mi run`, set: `${fmtPace(p)} /mi` });
     });
   });
   Object.values(out).forEach(l => l.sort((a, c) => a.date.localeCompare(c.date)));
@@ -4113,11 +4279,11 @@ function lvLiftAt(list, date) {
   let i = list.length - 1;
   while (i >= 0 && list[i].date > date) i--;
   if (i < 0) return list.length ? { v: list[0].v, idle: 0, best: list[0] } : null;
-  const from = addDays(list[i].date, -42);
+  const from = addDays(list[i].date, -42), days = new Set();
   let best = list[i];
-  for (let j = i; j >= 0 && list[j].date >= from; j--) if (list[j].v > best.v) best = list[j];
+  for (let j = i; j >= 0 && list[j].date >= from; j--) { days.add(list[j].date); if (list[j].v > best.v) best = list[j]; }
   const idle = daysBetween(list[i].date, date);
-  return { v: best.v * (idle > 21 ? Math.max(0.75, 1 - 0.02 * (idle - 21) / 7) : 1), idle, best };
+  return { v: best.v * (idle > 21 ? Math.max(0.75, 1 - 0.02 * (idle - 21) / 7) : 1), idle, best, n: days.size };
 }
 function lvValue(sk, ses, date) {
   if (LV_LIFTS[sk.k] || sk.k === 'cardio') return lvLiftAt(ses[sk.k], date);
@@ -4131,15 +4297,18 @@ function lvValue(sk, ses, date) {
   return null;
 }
 // Level 1 is the lowest point on record: checked week by week from your first workout to today.
+// Lift skills only count weeks backed by 2+ sessions in the last six weeks, so one lone light session
+// after a break (a single set of easy dumbbell rows) can't set level 1 too low.
 function lvLowest(sk, ses) {
   const today = todayStr(), first = lvFirstDate() || today;
-  let low = null;
+  let low = null, sturdy = null;
   for (let d = first; ; d = addDays(d, 7)) {
     const at = d > today ? today : d, x = lvValue(sk, ses, at);
     if (x && (low == null || (sk.lower ? x.v > low : x.v < low))) low = x.v;
+    if (x && LV_LIFTS[sk.k] && x.n >= 2 && (sturdy == null || x.v < sturdy)) sturdy = x.v;
     if (at === today) break;
   }
-  return low;
+  return sturdy ?? low;
 }
 function lvCompute() {
   const ses = lvSessions(), today = todayStr(), bases = (S.settings.levels || {}).bases || {};
@@ -4188,7 +4357,7 @@ function lvFmt(sk, v) {
   if (LV_LIFTS[sk.k]) return `${Math.round(v / lvF(sk) / LV_12)} lb × 12`;
   if (sk.meas) return `${round1(v)}"`;
   if (sk.k === 'weight') return `${round1(v)} lb`;
-  if (sk.k === 'cardio') return `${fmtPace(60 / v)} /mi`;
+  if (sk.k === 'cardio') return `${fmtPace(60 / v)} /mi 5K pace`;
   return `${Math.round(v)} workouts`;
 }
 // The value a level starts at, for "next level at …".
@@ -4215,10 +4384,18 @@ function checkLevels() {
     if (!skills.length) return;
     let st = S.settings.levels;
     if (!st || !st.shown) {
-      st = S.settings.levels = { bases: {}, shown: {}, vals: {}, downDay: today };
+      st = S.settings.levels = { bases: {}, shown: {}, vals: {}, downDay: today, v: LV_V };
       skills.forEach(s => { st.bases[s.k] = s.base; st.shown[s.k] = Math.floor(s.lv); st.vals[s.k] = s.v; });
       saveSettings();
       lvPop({ kind: 'intro', overall: lvOverall(st.shown), n: skills.length });
+      return;
+    }
+    // Nov 2026 trainer check-up: new legs and waist goals and sturdier level 1 starting points. Levels
+    // move to where they now land without any pop-up, since nothing about you changed.
+    if ((st.v || 1) < LV_V) {
+      const ses = lvSessions();
+      skills.forEach(s => { if (LV_LIFTS[s.k]) { const b = lvLowest(s, ses); if (b != null) { st.bases[s.k] = b; s.base = b; } } s.lv = lvLevel(s.v, s.base, s.goal, s.lower); st.shown[s.k] = Math.floor(s.lv); st.vals[s.k] = s.v; });
+      st.v = LV_V; saveSettings();
       return;
     }
     const before = lvOverall(st.shown), ups = [], downs = [], checkDown = st.downDay !== today;
@@ -4718,19 +4895,10 @@ const ACT = {
   'ex-chart': d => { S.view = { name: 'exercise', key: d.key, back: S.view }; render(); scrollTo(0, 0); },
   'day-view': d => { S.dayView = d.d === todayStr() ? null : d.d; render(); scrollTo(0, 0); },
   'rest-today': () => {
-    const today = todayStr(), cur = dayMoves(), m = { ...cur }, prev = {}, key = planKeyOn(today);
-    const set = (d, k) => { prev[d] = d in cur ? cur[d] : null; if (k === dayKeyOf(d)) delete m[d]; else m[d] = k; };
-    set(today, 'off');
-    let carry = key;
-    for (let i = 1; i <= 7; i++) {
-      const d = addDays(today, i), was = planKeyOn(d);
-      set(d, carry);
-      if ((planOf(was) || {}).type === 'rest') break;
-      carry = was;
-    }
+    const today = todayStr(), { m, prev, key, to } = restPlan(today);
     Object.keys(m).forEach(d => { if (d < addDays(today, -30)) delete m[d]; });
     S.settings.dayMoves = m;
-    S.settings.restUndo = { date: today, prev, key, to: addDays(today, 1) };
+    S.settings.restUndo = { date: today, prev, key, to };
     S.pickDay = null; S.draft = null;
     saveSettings(); render(); scrollTo(0, 0);
   },
