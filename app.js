@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.10.0';
+const APP_VERSION = '2.11.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -341,7 +341,14 @@ const hasWork = w => (w.exercises || []).some(e => doneSets(e).length) || (w.act
 const isDayKey = k => DAYS.includes(k);
 const BLANK_PLAN = { label: 'Custom workout', type: 'strength', groups: [] };
 const ACT_PLAN = { label: 'Activity', type: 'rest' };
-const planOf = k => (k === 'act' ? ACT_PLAN : isDayKey(k) ? S.program.days[k] : S.program.custom.find(c => c.id === k)) || null;
+// "Take today as a rest day": settings.dayMoves maps a date to the day plan it uses instead of its
+// weekday's ('off' = rest). Today's lift moves to tomorrow, and each lift after it moves back a day
+// until a rest day takes it in.
+const OFF_PLAN = { label: 'Rest day', type: 'rest' };
+const dayMoves = () => S.settings.dayMoves || {};
+const planKeyOn = date => dayMoves()[date] || dayKeyOf(date);
+const planOn = date => planOf(planKeyOn(date)) || S.program.days[dayKeyOf(date)];
+const planOf = k => (k === 'off' ? OFF_PLAN : k === 'act' ? ACT_PLAN : isDayKey(k) ? S.program.days[k] : S.program.custom.find(c => c.id === k)) || null;
 const titleOf = w => (isDayKey(w.dayKey) ? DAY_NAMES[w.dayKey] : w.label);
 const allPlans = () => [...DAYS.map(d => S.program.days[d]), ...S.program.custom];
 const targetOf = e => classify(e.target);
@@ -623,7 +630,7 @@ function todaySession() {
   const late = sortedW().find(w => w.date === addDays(date, -1) && lastSetAt(w) && isLive(w));
   if (late && !todays.some(hasWork) && !(S.pickDay && S.pickDay.date === date)) return late;
   const picked = S.pickDay && S.pickDay.date === date ? S.pickDay.k : null;
-  const dayKey = picked || (todays.find(hasAny) || {}).dayKey || dayKeyOf(date);
+  const dayKey = picked || (todays.find(dayMoves()[date] === 'off' ? hasWork : hasAny) || {}).dayKey || planKeyOn(date);
   const found = todays.find(w => w.dayKey === dayKey);
   if (!found && (!S.draft || S.draft.date !== date || S.draft.dayKey !== dayKey)) S.draft = buildSession(dayKey, date);
   const w = found || S.draft;
@@ -922,10 +929,10 @@ function applyMakeUp(w) {
   const count = name => { have.add(keyOf(name)); Object.entries(musclesOf(name)).forEach(([m, f]) => { if (f >= 1) direct.add(m); }); };
   w.exercises.forEach(e => count(e.name));
   S.workouts.filter(o => o.id !== w.id && o.date >= ws && o.date <= w.date).forEach(o => (o.exercises || []).forEach(e => { if (doneSets(e).length) count(e.name); }));
-  const owe = d => { const plan = S.program.days[dayKeyOf(d)]; if (plan && plan.type === 'strength') (plan.groups || []).forEach(g => g.forEach(x => owed.push({ x, d }))); };
+  const owe = d => { const plan = planOn(d); if (plan && plan.type === 'strength') (plan.groups || []).forEach(g => g.forEach(x => owed.push({ x, d }))); };
   for (let d = ws; d < w.date; d = addDays(d, 1)) {
     if (d < today) { owe(d); continue; }
-    const sess = d === today ? todaySession() : (S.program.days[dayKeyOf(d)] || {}).type === 'strength' ? buildSession(dayKeyOf(d), d) : null;
+    const sess = d === today ? todaySession() : (planOn(d) || {}).type === 'strength' ? buildSession(planKeyOn(d), d) : null;
     if (d === today) owe(d);
     if (sess && sess.type === 'strength') (sess.exercises || []).forEach(e => count(e.name));
   }
@@ -957,9 +964,9 @@ function weekShift(w, e) {
   if (!e || w.date !== todayStr()) return '';
   const main = Object.entries(musclesOf(e.name || e.key)).filter(([, f]) => f >= 1).map(([m]) => m);
   for (let d = addDays(w.date, 1); d <= addDays(weekStart(w.date), 6); d = addDays(d, 1)) {
-    const plan = S.program.days[dayKeyOf(d)];
+    const plan = planOn(d);
     if (!plan || plan.type !== 'strength') continue;
-    const ahead = buildSession(dayKeyOf(d), d), day = fmtDate(d, { weekday: 'long' });
+    const ahead = buildSession(planKeyOn(d), d), day = fmtDate(d, { weekday: 'long' });
     if (ahead.exercises.some(x => x.makeUp && x.key === e.key)) return ` It moves to ${day}.`;
     if (ahead.exercises.some(x => x.key === e.key)) return ` You've got it again ${day}.`;
     const cover = ahead.exercises.find(x => main.some(m => (musclesOf(x.name)[m] || 0) >= 1));
@@ -1675,7 +1682,7 @@ function render() {
 // A training day counts when you move: any workout or activity. A rest day also
 // counts with a weigh-in or your protein goal. (Days before this rule started keep the old one, where
 // a weigh-in or protein counted any day, so no streak was lost to the change.)
-const isTrainingDay = date => S.program.days[dayKeyOf(date)].type !== 'rest';
+const isTrainingDay = date => planOn(date).type !== 'rest';
 function dayCounts(date) {
   const b = S.body[date] || {};
   if (S.workouts.some(w => w.date === date && hasWork(w))) return true;
@@ -2096,7 +2103,7 @@ function recommendYoga(date) {
   const hist = yogaHistory(date);
   const energy = energyFor(date);
   const sore = recentSoreness(date), y = dayLoad(addDays(date, -1)), legs = y.legs;
-  const tomorrow = S.program.days[dayKeyOf(addDays(date, 1))];
+  const tomorrow = planOn(addDays(date, 1));
   const tomorrowLift = tomorrow && tomorrow.type === 'strength';
   const did60 = hist.some(h => h.min >= 60 && h.date >= addDays(date, -6));
   const scored = YOGA_CLASSES.map(c => {
@@ -2281,6 +2288,8 @@ function todaySummary(date, w) {
       <div class="seg">${SLEEP.map(([v, n]) => `<button class="${(sleepPick(sleepFor(date)) || [])[0] === v ? 'on' : ''}" data-a="sleep" data-v="${v}">${n}</button>`).join('')}</div>
     </div>`}
     <div class="sh-hint">${en ? ENERGY_HINT[en] : 'How are you feeling? The plan adjusts.'}${twoShortNights(date) ? ' Two short nights: 2 sets a lift, no jumps.' : sleepShort(date) ? ' Under 6 hrs of sleep: no jumps, easier cardio.' : ''}</div>
+    ${w.type === 'strength' && !hasWork(w) && isDayKey(w.dayKey) && w.dayKey === planKeyOn(date) && date === todayStr()
+      ? `<button class="rest-today" data-a="rest-today"><b>Take today as a rest day</b><span>Too sore or busy? ${esc(planOf(w.dayKey).label)} moves to tomorrow.</span></button>` : ''}
   </div>`;
 }
 
@@ -2333,7 +2342,7 @@ function weekChips(shown) {
   return `<div class="chips days">${DAYS.map((d, k) => {
     const date = addDays(ws, k);
     const did = S.workouts.some(w => w.date === date && hasWork(w));
-    const cls = [date === shown ? 'on' : '', date === today ? 'today' : '', S.program.days[d].type === 'rest' ? 'rest' : ''].join(' ');
+    const cls = [date === shown ? 'on' : '', date === today ? 'today' : '', planOn(date).type === 'rest' ? 'rest' : ''].join(' ');
     return `<button class="chip ${cls}" data-a="day-view" data-d="${date}" aria-label="${DAY_NAMES[d]} ${esc(fmtDate(date, { month: 'long', day: 'numeric' }))}">${DAY_SHORT[d]}<small>${parseYmd(date).getDate()}</small>${did ? '<span class="dot"></span>' : ''}</button>`;
   }).join('')}</div>`;
 }
@@ -2350,9 +2359,9 @@ function viewToday() {
   const date = todayStr();
   if (S.dayView && S.dayView !== date && weekStart(S.dayView) === weekStart(date)) return viewDay(S.dayView);
   const w = todaySession();
-  const realKey = dayKeyOf(date);
+  const realKey = dayKeyOf(date), planned = planKeyOn(date);
   const day = planOf(w.dayKey) || { label: w.label };
-  const custom = !isDayKey(w.dayKey);
+  const custom = !isDayKey(w.dayKey) && w.dayKey !== 'off';
   return `
     <header class="top">
       <div class="top-row">
@@ -2360,8 +2369,9 @@ function viewToday() {
         <div class="pills">${levelPill()}<button class="streak-pill ${dayCounts(date) ? 'on' : ''}" data-a="tab" data-t="stats" aria-label="Daily streak">🔥 ${dailyStreak()}</button></div>
       </div>
       ${custom ? `<h1>${esc(w.label)}<span class="sub">${w.dayKey === 'free' ? 'Build it as you go' : 'One of your saved workouts'}</span></h1>`
-        : `<h1>${DAY_NAMES[realKey]}<span class="sub">${esc(day.label)}${w.dayKey !== realKey ? ` (${DAY_NAMES[w.dayKey]}'s workout)` : ''}</span></h1>`}
-      ${!custom && w.dayKey !== realKey ? `<div class="note-line">Doing ${DAY_NAMES[w.dayKey]}'s workout today. <button class="linkbtn inline" data-a="pick-day" data-k="${realKey}">Switch back</button></div>` : ''}
+        : `<h1>${DAY_NAMES[realKey]}<span class="sub">${esc(day.label)}${isDayKey(w.dayKey) && w.dayKey !== realKey ? ` (${DAY_NAMES[w.dayKey]}'s workout)` : ''}</span></h1>`}
+      ${!custom && w.dayKey !== planned ? `<div class="note-line">Doing ${w.dayKey === 'off' ? 'a rest day' : `${DAY_NAMES[w.dayKey]}'s workout`} today. <button class="linkbtn inline" data-a="pick-day" data-k="${planned}">Switch back</button></div>` : ''}
+      ${!custom && w.dayKey === planned && isDayKey(planned) && planned !== realKey ? `<div class="note-line muted">Moved here from ${DAY_NAMES[planned]} after a rest day.</div>` : ''}
       ${alsoToday(w)}
     </header>
     ${welcomeCard()}
@@ -2379,26 +2389,26 @@ function viewToday() {
 
 // Another day this week: look back at what you logged, or ahead at what's planned.
 function viewDay(date) {
-  const k = dayKeyOf(date), plan = S.program.days[k], past = date < todayStr();
+  const k = dayKeyOf(date), pk = planKeyOn(date), plan = planOn(date), past = date < todayStr();
   const logged = sortedW().filter(w => w.date === date && hasAny(w));
-  const missed = past && plan.type !== 'rest' && !weekDoneKeys(weekStart(date)).includes(k);
+  const missed = past && plan.type !== 'rest' && !weekDoneKeys(weekStart(date)).includes(pk);
   let body;
   if (logged.length) {
     body = logged.map(w => `${logged.length > 1 ? `<div class="lbl day-lbl">${esc(w.label)}</div>` : ''}${sessionBody(w)}`).join('');
   } else if (past) {
     body = `<div class="card empty"><b>Nothing logged</b>${plan.type === 'rest' ? 'It was a rest day.' : `The plan was ${esc(plan.label)}.`}</div>
       <button class="btn block" data-a="past-open" data-d="${date}">+ Log something for ${DAY_NAMES[k]}</button>`;
-  } else body = previewDay(k, date);
+  } else body = previewDay(pk, date);
   return `<header class="top">
       <div class="top-row"><button class="linkbtn back-today" data-a="day-view" data-d="${todayStr()}">‹ Back to today</button></div>
       <h1>${DAY_NAMES[k]}<span class="sub">${esc(fmtDate(date, { month: 'long', day: 'numeric' }))} · ${past ? (logged.length ? esc(logged[0].label) : 'Past day') : `Coming up · ${esc(plan.label)}`}</span></h1>
     </header>
     ${weekChips(date)}
     ${body}
-    ${missed || (!past && plan.type !== 'rest') ? `<button class="btn block" data-a="do-today" data-k="${k}">${past ? 'Do this workout today' : 'Do this workout today instead'}</button>` : ''}`;
+    ${missed || (!past && plan.type !== 'rest') ? `<button class="btn block" data-a="do-today" data-k="${pk}">${past ? 'Do this workout today' : 'Do this workout today instead'}</button>` : ''}`;
 }
 function previewDay(k, date) {
-  const plan = S.program.days[k];
+  const plan = planOf(k) || S.program.days[dayKeyOf(date)];
   if (plan.type === 'rest') return '<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Nothing planned. Recover, eat, sleep.</div></div>';
   if (plan.type === 'cardio') {
     const rec = recommendCardio(date, k);
@@ -2547,6 +2557,12 @@ function sessionRest(w) {
   const acts = (w.activities || []).length;
   const kcal = acts ? workoutKcal(w) : null;
   const isToday = w.date === todayStr();
+  const u = S.settings.restUndo, off = isToday && dayMoves()[w.date] === 'off' && u && u.date === w.date;
+  if (off && !acts) return `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Taking today off. ${esc((planOf(u.key) || {}).label || 'Your lift')} moves to ${esc(fmtDate(u.to, { weekday: 'long' }))}. Recover, eat your protein, sleep well.</div>
+      <button class="linkbtn" style="margin-top:10px" data-a="rest-undo">Undo, I'll lift today</button></div>
+    ${actCards(w)}
+    <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Activity</button>
+    <button class="btn block" data-a="go-body">Log bodyweight and protein</button>`;
   return `${acts || !isToday ? '' : `<div class="card rest-card"><div class="big">Rest day</div><div class="muted">Recover, eat your protein, sleep well. Missed a session? Tap its day above.</div></div>`}
     ${actCards(w)}
     <button class="btn block" data-a="act-pick" data-wid="${w.id}">+ Activity</button>
@@ -3045,8 +3061,7 @@ function viewStats() {
   const need = planned.length;
   const doneNow = new Set(weekDoneKeys(ws));
   const dots = DAYS.map(d => {
-    const rest = S.program.days[d].type === 'rest';
-    const dd = addDays(ws, DAYS.indexOf(d)), did = doneNow.has(d) || S.workouts.some(x => x.date === dd && hasWork(x));
+    const dd = addDays(ws, DAYS.indexOf(d)), rest = planOn(dd).type === 'rest', did = doneNow.has(d) || S.workouts.some(x => x.date === dd && hasWork(x));
     const cls = [did ? 'done' : '', rest ? 'rest' : '', d === dayKeyOf(today) ? 'today' : ''].join(' ');
     return `<div class="wd ${cls}"><i>${did ? ic('check') : ''}</i>${DAY_SHORT[d]}</div>`;
   }).join('');
@@ -3719,7 +3734,7 @@ function otherSheetHTML() {
   const cs = S.program.custom;
   return `<div class="sh-grip"></div>
     <div class="sh-title">Do a different workout<span>Instead of today's planned one</span></div>
-    ${S.pickDay && S.pickDay.date === todayStr() && S.pickDay.k !== dayKeyOf(todayStr()) ? `<button class="btn block" data-a="pick-day" data-k="${dayKeyOf(todayStr())}">Back to today's plan (${esc(S.program.days[dayKeyOf(todayStr())].label)})</button>` : ''}
+    ${S.pickDay && S.pickDay.date === todayStr() && S.pickDay.k !== planKeyOn(todayStr()) ? `<button class="btn block" data-a="pick-day" data-k="${planKeyOn(todayStr())}">Back to today's plan (${esc(planOn(todayStr()).label)})</button>` : ''}
     ${cs.length ? `<div class="card flush">${cs.map(c => `<button class="row" data-a="start-plan" data-k="${c.id}">
       <div><b>${esc(c.label)}</b><small>${plural(sum((c.groups || []).map(g => g.length)), 'exercise')}</small></div>${ic('chev')}</button>`).join('')}</div>` : ''}
     <button class="btn pri block" data-a="start-plan" data-k="free">Start a blank workout</button>
@@ -4702,6 +4717,32 @@ const ACT = {
   },
   'ex-chart': d => { S.view = { name: 'exercise', key: d.key, back: S.view }; render(); scrollTo(0, 0); },
   'day-view': d => { S.dayView = d.d === todayStr() ? null : d.d; render(); scrollTo(0, 0); },
+  'rest-today': () => {
+    const today = todayStr(), cur = dayMoves(), m = { ...cur }, prev = {}, key = planKeyOn(today);
+    const set = (d, k) => { prev[d] = d in cur ? cur[d] : null; if (k === dayKeyOf(d)) delete m[d]; else m[d] = k; };
+    set(today, 'off');
+    let carry = key;
+    for (let i = 1; i <= 7; i++) {
+      const d = addDays(today, i), was = planKeyOn(d);
+      set(d, carry);
+      if ((planOf(was) || {}).type === 'rest') break;
+      carry = was;
+    }
+    Object.keys(m).forEach(d => { if (d < addDays(today, -30)) delete m[d]; });
+    S.settings.dayMoves = m;
+    S.settings.restUndo = { date: today, prev, key, to: addDays(today, 1) };
+    S.pickDay = null; S.draft = null;
+    saveSettings(); render(); scrollTo(0, 0);
+  },
+  'rest-undo': () => {
+    const u = S.settings.restUndo;
+    if (!u) return;
+    const m = { ...dayMoves() };
+    Object.entries(u.prev).forEach(([d, k]) => { if (k == null) delete m[d]; else m[d] = k; });
+    S.settings.dayMoves = m; delete S.settings.restUndo;
+    S.pickDay = null; S.draft = null;
+    saveSettings(); render(); scrollTo(0, 0);
+  },
   'do-today': d => { S.pickDay = { date: todayStr(), k: d.k }; S.dayView = null; render(); scrollTo(0, 0); },
   'add-act': d => {
     const w = getW(d.wid);
