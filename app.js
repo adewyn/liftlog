@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '2.9.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -3993,20 +3993,22 @@ const LV_MAX = 60;
 const LV_DB = /\b(db|dumbbells?|kettlebells?|kb|one.?arm|single.?arm)\b/;
 // Strength skills turn every matching lift into one reference lift (an estimated one-rep max), so
 // switching between, say, barbell bench and DB bench doesn't reset you. Dumbbell factors include both hands.
+// Goals are written as weight for 12 reps (what you actually lift); the math runs on the 1-rep estimate.
+const LV_12 = 1 + 12 / 30;
 const LV_LIFTS = {
-  chest: { ref: 'bench press', goal: 250, no: /\b(dip|fly|flye|shoulder|overhead|triceps|close|pushdown|crossover)/, rules: [
+  chest: { ref: 'bench press', goal: 185 * LV_12, no: /\b(dip|fly|flye|shoulder|overhead|triceps|close|pushdown|crossover)/, rules: [
     [n => /incline/.test(n) && LV_DB.test(n), 2.9], [n => LV_DB.test(n) && /bench|chest press|floor press|\bpress\b/.test(n), 2.5],
     [n => /incline/.test(n) && /press|bench/.test(n), 1.15], [n => /bench press|barbell bench/.test(n), 1], [n => /chest press/.test(n), 0.9]] },
-  shoulders: { ref: 'overhead press', goal: 155, no: /\b(cuban|raise|bench|chest|incline)/, rules: [
+  shoulders: { ref: 'overhead press', goal: 115 * LV_12, no: /\b(cuban|raise|bench|chest|incline)/, rules: [
     [n => /(shoulder|overhead|military|arnold) press/.test(n) && LV_DB.test(n), 2.35], [n => /machine/.test(n) && /shoulder press/.test(n), 0.9],
     [n => /(overhead|military|shoulder) press|^ohp\b/.test(n), 1]] },
-  lats: { ref: 'lat pulldown', goal: 220, no: /\b(assist|band|negative|straight.?arm)/, rules: [[n => /pulldown/.test(n), 1], [n => /\b(pull|chin)-up/.test(n), 'bw']] },
-  back: { ref: 'row', goal: 225, no: /\b(upright|couch|face|inverted|ring)/, rules: [[n => /\brows?\b/.test(n) && LV_DB.test(n), 2.25], [n => /\brows?\b/.test(n), 1]] },
-  legs: { ref: 'leg press', goal: 500, no: /\b(bodyweight|kettlebell|kb|goblet|split|single|lunge|wide single|curl|extension|calf|jump)/, rules: [
+  lats: { ref: 'lat pulldown', goal: 165 * LV_12, no: /\b(assist|band|negative|straight.?arm)/, rules: [[n => /pulldown/.test(n), 1], [n => /\b(pull|chin)-up/.test(n), 'bw']] },
+  back: { ref: 'row', goal: 170 * LV_12, no: /\b(upright|couch|face|inverted|ring)/, rules: [[n => /\brows?\b/.test(n) && LV_DB.test(n), 2.25], [n => /\brows?\b/.test(n), 1]] },
+  legs: { ref: 'leg press', goal: 360 * LV_12, no: /\b(bodyweight|kettlebell|kb|goblet|split|single|lunge|wide single|curl|extension|calf|jump)/, rules: [
     [n => /leg press/.test(n), 1], [n => /pendulum|hack|belt squat/.test(n), 1.5], [n => /hex bar squat|trap bar squat/.test(n), 1.4], [n => /\bsquat/.test(n), 1.6]] },
-  glutes: { ref: 'hip thrust', goal: 405, no: /\b(single|one.?leg|kettlebell|kb)/, rules: [
+  glutes: { ref: 'hip thrust', goal: 300 * LV_12, no: /\b(single|one.?leg|kettlebell|kb)/, rules: [
     [n => /hip thrust|glute bridge/.test(n), 1], [n => /romanian|\brdl\b|stiff/.test(n), 1.45], [n => /(hex|trap) bar deadlift/.test(n), 1], [n => /deadlift/.test(n), 1.1]] },
-  arms: { ref: 'barbell curl', goal: 125, no: /\b(leg|hamstring|wrist|mace|nordic)/, rules: [
+  arms: { ref: 'barbell curl', goal: 90 * LV_12, no: /\b(leg|hamstring|wrist|mace|nordic)/, rules: [
     [n => /curl/.test(n) && (LV_DB.test(n) || /hammer/.test(n)), 2.4], [n => /(bar|barbell|ez|ez-bar|cable) curl/.test(n), 1], [n => /curl/.test(n), 0.9]] },
 };
 const LV_SKILLS = [
@@ -4138,7 +4140,7 @@ function lvCompute() {
 const lvOverall = shown => { const v = Object.values(shown); return v.length ? Math.floor(sum(v) / v.length) : 1; };
 function lvFmt(sk, v) {
   if (v == null) return '–';
-  if (LV_LIFTS[sk.k]) return `${Math.round(v)} lb`;
+  if (LV_LIFTS[sk.k]) return `${Math.round(v / LV_12)} lb × 12`;
   if (sk.meas) return `${round1(v)}"`;
   if (sk.k === 'weight') return `${round1(v)} lb`;
   if (sk.k === 'cardio') return `${fmtPace(60 / v)} /mi`;
@@ -4150,7 +4152,7 @@ const lvLower = n => (/^[A-Z][a-z]/.test(n) ? n[0].toLowerCase() + n.slice(1) : 
 function lvWhy(s, was) {
   const old = was != null && lvFmt(s, was) !== lvFmt(s, s.v) ? was : null;
   if ((LV_LIFTS[s.k] || s.k === 'cardio') && s.idle > 21) return `No ${s.k === 'cardio' ? 'runs' : `${s.name.toLowerCase()} work`} logged in ${Math.round(s.idle / 7)} weeks, so it's fading.`;
-  if (LV_LIFTS[s.k]) return `Your best ${lvLower(s.best.name)} lately (${s.best.set}) works out to a ${lvFmt(s, s.v)} ${LV_LIFTS[s.k].ref}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
+  if (LV_LIFTS[s.k]) return `Your best ${lvLower(s.best.name)} lately (${s.best.set}) is like ${lvFmt(s, s.v)} on ${LV_LIFTS[s.k].ref}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'cardio') return `Your best recent pace is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'weight') return `Your two-week average is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'waist') return `Your waist measured ${lvFmt(s, s.v)}${old ? `, up from ${lvFmt(s, old)}` : ''}.`;
@@ -4297,8 +4299,8 @@ function levelsCard() {
   </div>`;
 }
 function lvDetail(s, lv) {
-  const ref = LV_LIFTS[s.k] ? ` ${LV_LIFTS[s.k].ref}` : '';
-  const now = LV_LIFTS[s.k] && s.best ? `About a ${lvFmt(s, s.v)}${ref} max, from your ${esc(lvLower(s.best.name))} (${esc(s.best.set)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
+  const ref = LV_LIFTS[s.k] ? ` on ${LV_LIFTS[s.k].ref}` : '';
+  const now = LV_LIFTS[s.k] && s.best ? `Like ${lvFmt(s, s.v)}${ref}, from your ${esc(lvLower(s.best.name))} (${esc(s.best.set)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
     : s.k === 'cardio' && s.best ? `Best recent pace ${lvFmt(s, s.v)} (${esc(s.best.name)})${s.idle > 21 ? `, faded after ${Math.round(s.idle / 7)} weeks off` : ''}.`
       : s.k === 'habit' ? `${Math.round(s.v)} workout days in the last 8 weeks.`
         : s.k === 'weight' ? `Two-week average ${lvFmt(s, s.v)}.` : `Last measured ${lvFmt(s, s.v)}${s.on ? ` on ${esc(fmtDate(s.on, { month: 'short', day: 'numeric' }))}` : ''}.`;
