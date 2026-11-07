@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.14.0';
+const APP_VERSION = '2.14.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -586,7 +586,7 @@ function recentPerf(key, w, n) {
     if (out.length >= n) break;
     if (o.id === w.id) continue;
     if (o.date > w.date || (o.date === w.date && o.createdAt > w.createdAt)) continue;
-    const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length);
+    const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length && !!x.pin === pinOn(key));
     if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) || offDay(o), note: liftNote(o, e.name), t: e.target ? { min: e.target.min, max: e.target.max } : null, grace: (e.coach && e.coach.grace) || 0 });
   }
   return out;
@@ -712,11 +712,11 @@ function adjustRest(w, e, j) {
   const careful = REHAB_WORDS.test(e.name) || !!careOf(e.name);
   if (+s.r >= hi + 2 && j <= 1 && !easy && !careful) {
     rest.forEach(x => { x.w = x.pw = round2(w0 + step); x.r = x.pr = lo; });
-    return { t: `Strong set. Next one +${step} lb.`, tone: 'up' };
+    return { t: isPin(e) ? 'Strong set. Next one up a pin.' : `Strong set. Next one +${step} lb.`, tone: 'up' };
   }
   if ((+s.r <= lo - 2 || (j === 0 && +s.r < lo)) && w0 > step) {
     rest.forEach(x => { x.w = x.pw = round2(w0 - step); x.r = x.pr = lo; });
-    return { t: `Under ${lo}, so −${step} lb next set to stay in range.`, tone: 'down' };
+    return { t: isPin(e) ? `Under ${lo}, so down a pin next set to stay in range.` : `Under ${lo}, so −${step} lb next set to stay in range.`, tone: 'down' };
   }
   return null;
 }
@@ -725,7 +725,7 @@ function adjustRest(w, e, j) {
 function sessionExercise(x, group, w) {
   classify(x);
   const e = {
-    key: keyOf(x.name), name: x.name, group, pid: x.id || null, ...(x.place === 'home' ? { place: 'home' } : {}),
+    key: keyOf(x.name), name: x.name, group, pid: x.id || null, ...(x.place === 'home' ? { place: 'home' } : {}), ...(pinOn(x.name) ? { pin: true } : {}),
     target: { sets: x.sets, min: x.min, max: x.max, inc: x.inc, kind: x.kind, body: x.body, stepSet: true, unit: x.unit || 'reps', note: x.note || '' },
     sets: [],
   };
@@ -740,6 +740,7 @@ function sessionExercise(x, group, w) {
 // your flat bench (a little less if that bench was a while ago).
 const FIRST_FROM = [[/incline (bench|barbell)/i, 'Bench press', 0.85]];
 function firstFrom(e, t, w) {
+  if (isPin(e)) return null;
   const f = FIRST_FROM.find(([re]) => re.test(e.name)) || familyStart(e, w);
   if (!f || t.min == null) return null;
   const h = recentPerf(keyOf(f[1]), w, 1)[0];
@@ -760,13 +761,18 @@ function familyStart(e, w) {
 }
 // Weight-stack machines logged by pin number ("Pec fly (stack #)", or "stack" in the lift's note) go up one pin at a time.
 const isStack = (name, note) => /\(stack ?#?\)/i.test(name || '') || /\bstack\b/i.test(note || '');
+// Cable machines whose stack shows 1, 2, 3… instead of pounds: switch the lift to pin numbers in its
+// ⋯ menu. It's remembered per lift, and pin sessions and pound sessions keep separate histories.
+const pinOn = key => !!((S.settings.prefs || {})[keyOf(key)] || {}).pin;
+const isPin = e => !!e && (!!e.pin || isStack(e.name, (e.target || {}).note));
+const pinText = t => String(t || '').replace(/([+−-])(\d+(?:\.\d+)?) lb\b/g, '$1$2 pin').replace(/(\d+(?:\.\d+)?) lb\b/g, 'pin $1');
 // The target a lift is really aiming for today: shoulder care stays at 10 to 12 reps, lifts that cause
 // pressure move to lighter sets of 8 to 12 (never past 12, your cap), and stack machines step one pin.
 function effTarget(e) {
   const base = targetOf(e);
   const lo = REHAB_WORDS.test(e.name) ? 10 : 8;
   let t = REHAB_WORDS.test(e.name) || careOf(e.name) === 'pressure' ? { ...base, min: Math.max(base.min ?? lo, lo), max: Math.max(Math.min(base.max ?? REP_CAP, REP_CAP), lo) } : base;
-  if (isStack(e.name, base.note)) t = { ...t, inc: 1, stack: true };
+  if (isPin(e)) t = { ...t, inc: 1, stack: true };
   return t;
 }
 function fillSets(e, w) {
@@ -825,6 +831,7 @@ function fillSets(e, w) {
     return plan ? { w: plan.ws[k], r: pr, done: false, pw: plan.ws[k], pr }
       : { w: NO_WEIGHT.test(e.name) ? 0 : '', r: t.min ?? t.max ?? '', done: false };
   });
+  if (isPin(e) && e.coach && e.coach.note) e.coach.note = pinText(e.coach.note);
 }
 
 // A lift done at different rep ranges on different days (heavy Monday, light Friday) builds on the
@@ -1490,6 +1497,12 @@ function swapPicks(w, i) {
     if (near.length >= 3) picks = near;
   }
   return picks;
+}
+function pinSeg(name) {
+  const on = pinOn(name);
+  return `<label class="lbl">How the weight is counted</label>
+    <div class="seg"><button class="${on ? '' : 'on'}" data-a="pin-mode" data-v="">Pounds</button><button class="${on ? 'on' : ''}" data-a="pin-mode" data-v="1">Pin number (1, 2, 3…)</button></div>
+    <div class="sh-hint">${on ? 'Log the number on the pin. It goes up one pin at a time, and pin sessions keep their own history.' : "Machine shows 1, 2, 3… instead of pounds? Pick pin number."}</div>`;
 }
 function notForMeHTML(name, isBodyweight) {
   const pr = prefOf(name);
@@ -2950,7 +2963,7 @@ function exBlock(w, i, letter) {
   const last = lastPerf(e.key, w);
   const c = isLive(w) ? e.coach : null;
   // Machines logged by pin number show "#8", not "8 lb".
-  const stack = /\(stack #\)/.test(e.name);
+  const stack = isPin(e);
   const unit = e.target.unit === 'steps' ? 'steps' : 'reps';
   const lastTxt = last
     ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>`
@@ -3683,7 +3696,7 @@ function liftBests(from, to, n = 6) {
     if ((from && w.date < from) || (to && w.date > to)) continue;
     for (const e of w.exercises || []) {
       const sets = doneSets(e).filter(x => +x.w > 0 && +x.r > 0);
-      if (!sets.length || /\(stack #\)/.test(e.name)) continue;
+      if (!sets.length || isPin(e)) continue;
       const best = Math.round(Math.max(...sets.map(x => e1rm(+x.w, +x.r))));
       const o = m.get(e.key) || { key: e.key, name: e.name, n: 0, e1: 0, date: w.date };
       o.n++;
@@ -4119,20 +4132,24 @@ function pastSheetHTML() {
 function setSheetHTML() {
   const sh = S.sheet, w = getW(sh.wid), e = w.exercises[sh.i], s = e.sets[sh.j];
   const steps = e.target.unit === 'steps';
-  const rd = steps ? 5 : 1;
+  const rd = steps ? 5 : 1, pin = isPin(e);
   return `<div class="sh-grip"></div>
     <div class="sh-title">${esc(e.name)}<span>Set ${sh.j + 1} of ${e.sets.length} · target ${esc(targetText(e.target))}</span></div>
-    <label class="lbl">Weight (lb)</label>
-    <div class="stepper">
+    <label class="lbl">${pin ? 'Pin number on the stack' : 'Weight (lb)'}</label>
+    ${pin ? `<div class="stepper three">
+      <button class="st-btn" data-a="ss-step" data-f="w" data-d="-1">−1</button>
+      <input class="st-inp" inputmode="numeric" data-ssf="w" value="${esc(sh.w)}" placeholder="">
+      <button class="st-btn" data-a="ss-step" data-f="w" data-d="1">+1</button>
+    </div>` : `<div class="stepper">
       <button class="st-btn" data-a="ss-step" data-f="w" data-d="-5">−5</button>
       <button class="st-btn sm" data-a="ss-step" data-f="w" data-d="-2.5">−2.5</button>
       <input class="st-inp" inputmode="decimal" data-ssf="w" value="${esc(sh.w)}" placeholder="">
       <button class="st-btn sm" data-a="ss-step" data-f="w" data-d="2.5">+2.5</button>
       <button class="st-btn" data-a="ss-step" data-f="w" data-d="5">+5</button>
     </div>
-    <button class="linkbtn" data-a="ss-bw">No weight (bodyweight)</button>
+    <button class="linkbtn" data-a="ss-bw">No weight (bodyweight)</button>`}
     ${sh.later ? `<div class="rem-row" style="margin-top:6px">
-      <div><b>Same weight for the next ${sh.later === 1 ? 'set' : `${sh.later} sets`}</b><small>${sh.chain ? 'A new weight here carries forward.' : 'Only this set changes, so each set keeps its own weight.'}</small></div>
+      <div><b>Same ${pin ? 'pin' : 'weight'} for the next ${sh.later === 1 ? 'set' : `${sh.later} sets`}</b><small>${sh.chain ? 'A new weight here carries forward.' : 'Only this set changes, so each set keeps its own weight.'}</small></div>
       <button class="toggle ${sh.chain ? 'on' : ''}" data-a="ss-chain">${sh.chain ? 'On' : 'Off'}</button>
     </div>` : ''}
     <label class="lbl">${steps ? 'Steps' : 'Reps'}</label>
@@ -4180,6 +4197,7 @@ function exSheetHTML() {
     ${picks.length ? `<label class="lbl">${sh.i == null ? 'Pick one you know' : 'Swap for (one tap)'}</label>
       <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="${ex ? 'sx-swap' : 'sf-pick'}" data-n="${esc(p.name)}">${esc(p.name)}</button>`).join('')}</div>` : ''}
     ${ex ? formLink(ex.name) : ''}
+    ${(ex || sh.g != null) && !NO_WEIGHT.test(ex ? ex.name : x.name) ? pinSeg(ex ? ex.name : x.name) : ''}
     ${ex || sh.g != null ? careSeg(ex ? ex.name : x.name) : ''}
     ${ex ? notForMeHTML(ex.name, BODYWEIGHT.test(ex.name)) : ''}
     ${ex ? '<button class="btn danger block" style="margin-top:12px" data-a="sx-rm">Remove from today</button><label class="lbl" style="margin-top:20px">Or change it</label>' : ''}
@@ -4613,7 +4631,7 @@ function lvSessions() {
   S.workouts.filter(w => w.date <= today).forEach(w => {
     (w.exercises || []).forEach(e => {
       const n = normName(e.name).toLowerCase(), note = ((e.target || {}).note || '').toLowerCase();
-      if (/stack|#/.test(n) || /stack|assist/.test(note)) return;
+      if (/stack|#/.test(n) || /stack|assist/.test(note) || e.pin) return;
       for (const [k, sk] of Object.entries(LV_LIFTS)) {
         if (sk.no.test(n)) continue;
         const rule = sk.rules.find(([m]) => m(n));
@@ -5233,6 +5251,20 @@ const ACT = {
       e.place = 'home'; persist(w);
       toast(`${e.name} is in your At home list now.`);
     } else if (d.v) { sh.toPlan = true; toast('Got it. Pick a swap above and it goes in your plan too.'); }
+    renderSheet(); render();
+  },
+  'pin-mode': d => {
+    const sh = S.sheet, w = sh.wid != null ? getW(sh.wid) : null, e = w && sh.i != null ? w.exercises[sh.i] : null;
+    const name = e ? e.name : sh.data && sh.data.name;
+    if (!name) return;
+    const on = !!d.v;
+    setPref(name, { pin: on || null });
+    if (e && !e.sets.some(x => x.done)) {
+      if (on) e.pin = true; else delete e.pin;
+      e.sets = [];
+      fillSets(e, w); persist(w);
+      toast(on ? `${e.name} now counts pin numbers. Enter the pin you use.` : `${e.name} is back to pounds.`);
+    } else toast(on ? `${name} counts pin numbers from next time.` : `${name} is back to pounds from next time.`);
     renderSheet(); render();
   },
   'pref-like': () => {
