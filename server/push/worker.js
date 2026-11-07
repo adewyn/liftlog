@@ -3,7 +3,7 @@
 // or did anything. If the nightly trainer is turned on in the app, it also keeps a copy of the log
 // (sync:<key>) and the trainer's latest changes (coach:<key>). Every 15 minutes it sends:
 //   - the weigh-in reminder, unless they've already weighed in that day
-//   - the streak saver, unless they've already done something that day
+//   - the streak saver, unless they've already done something that day or it's a rest day
 //   - on the 1st of the month, the check-in day reminder (measurements, plus photos every 3 months)
 // The pushes carry no data; the app's sw.js works out which one it is and what to say.
 
@@ -87,7 +87,7 @@ export default {
         time: body.time, weighOn: body.weighOn !== false,
         streakTime: body.streakTime || '14:00', streakOn: !!body.streakOn,
         measureTime: body.measureTime || '10:00', measureOn: !!body.measureOn,
-        lastSent: old.lastSent || '', lastStreak: old.lastStreak || '', lastMeasure: old.lastMeasure || '', weighed: old.weighed || '', active: old.active || '',
+        lastSent: old.lastSent || '', lastStreak: old.lastStreak || '', lastMeasure: old.lastMeasure || '', weighed: old.weighed || '', active: old.active || '', rest: old.rest || [],
       };
       await saveSubs(env, subs);
       return reply({ ok: true });
@@ -98,6 +98,13 @@ export default {
 
     if (path === 'unsubscribe') {
       delete subs[id];
+      await saveSubs(env, subs);
+      return reply({ ok: true });
+    }
+    if (path === 'rest') {
+      // The coming rest days (planned or taken): no streak reminder on those, since rest days count on their own.
+      const rest = Array.isArray(body.rest) ? body.rest.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 21) : [];
+      sub.rest = rest;
       await saveSubs(env, subs);
       return reply({ ok: true });
     }
@@ -126,7 +133,7 @@ export default {
       const due = t => { const [h, m] = t.split(':').map(Number); return minutes >= h * 60 + m && minutes < h * 60 + m + 60; };
       let field = null;
       if (s.weighOn !== false && due(s.time) && s.lastSent !== date && s.weighed !== date) field = 'lastSent';
-      else if (s.streakOn && due(s.streakTime || '14:00') && s.lastStreak !== date && s.active !== date) field = 'lastStreak';
+      else if (s.streakOn && due(s.streakTime || '14:00') && s.lastStreak !== date && s.active !== date && !(s.rest || []).includes(date)) field = 'lastStreak';
       else if (s.measureOn && date.endsWith('-01') && due(s.measureTime || '10:00') && s.lastMeasure !== date.slice(0, 7)) field = 'lastMeasure';
       if (!field) continue;
       try {

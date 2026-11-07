@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.15.0';
+const APP_VERSION = '2.15.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -2257,17 +2257,23 @@ function render() {
 }
 
 // ----- daily streak -----
-// A training day counts when you move: any workout or activity. A rest day also
-// counts with a weigh-in or your protein goal. (Days before this rule started keep the old one, where
-// a weigh-in or protein counted any day, so no streak was lost to the change.)
+// Rest is part of the plan, so rest days count on their own: the weekend ones and any day you take with
+// "Take today as a rest day". A training day counts when you move (any workout or activity), or once
+// its lift gets done later that week ("Do this workout today"). (Days before Nov 3, 2026 keep the old
+// rule too, where a weigh-in or protein counted any day, so no streak was lost to a change.)
 const isTrainingDay = date => planOn(date).type !== 'rest';
-function dayCounts(date) {
-  const b = S.body[date] || {};
-  if (S.workouts.some(w => w.date === date && hasWork(w))) return true;
-  if (isTrainingDay(date) && date >= (S.settings.streakRuleFrom || '9999')) return false;
-  return b.weight != null || (b.protein || 0) >= proteinTargetFor(date);
+function madeUpLater(date) {
+  const k = planKeyOn(date);
+  if ((planOf(k) || {}).type !== 'strength') return false;
+  const end = addDays(weekStart(date), 6);
+  return S.workouts.some(w => w.dayKey === k && w.date > date && w.date <= end && (w.exercises || []).some(e => doneSets(e).length));
 }
-const streakTodo = date => (isTrainingDay(date) ? 'lift, run, walk, or do yoga' : 'move, weigh in, or hit your protein');
+function dayCounts(date) {
+  if (!isTrainingDay(date) || S.workouts.some(w => w.date === date && hasWork(w)) || madeUpLater(date)) return true;
+  const b = S.body[date] || {};
+  return date < (S.settings.streakRuleFrom || '9999') && (b.weight != null || (b.protein || 0) >= proteinTargetFor(date));
+}
+const streakTodo = date => (isTrainingDay(date) ? 'lift, run, walk, or do yoga' : 'rest up, today counts');
 // Today still keeps the streak alive until midnight, so count back from yesterday if today isn't done yet.
 function dailyStreak() {
   let d = dayCounts(todayStr()) ? todayStr() : addDays(todayStr(), -1);
@@ -2298,6 +2304,13 @@ function celebrateDay() {
     S.activePinged = today;
     pushApi('active', { id: S.settings.reminder.id }).catch(() => { S.activePinged = null; });
   }
+  // The server skips the streak reminder on rest days (planned or taken), so send the next two weeks' rest days when they change.
+  const rest = Array.from({ length: 14 }, (_, k) => addDays(today, k)).filter(d => !isTrainingDay(d));
+  const rsig = `${S.settings.reminder.id}|${rest.join(',')}`;
+  if (S.settings.reminder.id && remAny(S.settings.reminder) && S.restSent !== rsig) {
+    S.restSent = rsig;
+    pushApi('rest', { id: S.settings.reminder.id, rest }).catch(() => {}); // tried again next time the app opens
+  }
   const st = JSON.stringify({ date: today, n: dailyStreak(), done, train: isTrainingDay(today) });
   if (st !== S.savedStreak) { S.savedStreak = st; DB.put('kv', { k: 'streak', v: JSON.parse(st) }); }
 }
@@ -2312,8 +2325,8 @@ function streakCard() {
   return `<div class="card">
       <div class="streak"><div class="big-num">🔥 ${n}</div>
         <div><b>day streak</b><div class="muted small">Best: ${best} day${best === 1 ? '' : 's'}</div></div></div>
-      <div class="sh-hint">${done ? 'Today counts. See you tomorrow.' : n ? `Keep it going today: ${streakTodo(today)}.` : `To start one today: ${streakTodo(today)}.`}</div>
-      <div class="sh-hint">Training days count when you move. Rest days also count with a weigh-in or your protein.</div>
+      <div class="sh-hint">${done && !isTrainingDay(today) && !S.workouts.some(w => w.date === today && hasWork(w)) ? 'Rest day: it counts for your streak. Recovery is part of training.' : done ? 'Today counts. See you tomorrow.' : n ? `Keep it going today: ${streakTodo(today)}.` : `To start one today: ${streakTodo(today)}.`}</div>
+      <div class="sh-hint">Training days count when you move. Rest days count on their own, and so does a day you take with “Take today as a rest day.”</div>
       <div class="cal">${DAYS.map(d => `<span>${DAY_SHORT[d][0]}</span>`).join('')}${cells}</div>
     </div>`;
 }
@@ -2919,7 +2932,10 @@ function weekDoneCount(ws) {
   const keyDays = new Set(inWeek.filter(w => keys.includes(w.dayKey)).map(w => w.date));
   const liftDayNoLift = w => (S.program.days[w.dayKey] || {}).type === 'strength' && !(w.exercises || []).some(e => doneSets(e).length);
   const extra = new Set(inWeek.filter(w => !keys.includes(w.dayKey) && !keyDays.has(w.date) && !liftDayNoLift(w)).map(w => w.date)).size;
-  return Math.min(plannedKeys().length, keys.length + extra);
+  // A rest day you take ("Take today as a rest day") is recovery, not a miss: if its lift couldn't fit back
+  // into the week, it still counts, once a week at most.
+  const took = Array.from({ length: 7 }, (_, k) => addDays(ws, k)).some(d => dayMoves()[d] === 'off' && (S.program.days[dayKeyOf(d)] || {}).type !== 'rest') ? 1 : 0;
+  return Math.min(plannedKeys().length, keys.length + extra + took);
 }
 const plannedKeys = () => DAYS.filter(d => S.program.days[d].type !== 'rest');
 

@@ -1,6 +1,6 @@
 // Offline support: serve the saved copy right away, refresh it in the background when online.
 // Bump CACHE when you change the app so old files are cleared.
-const CACHE = 'liftlog-v45';
+const CACHE = 'liftlog-v46';
 const ASSETS = [
   './',
   './index.html',
@@ -130,13 +130,15 @@ async function reminderText() {
       : { title: 'Check-in day 📏', body: 'Time for your monthly measurements: waist, chest, arms, and thighs.', url: './#body' };
   }
   const st = kv.streak || {};
+  const day = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][now.getDay()];
+  const days = kv.program && kv.program.days, moved = ((kv.settings || {}).dayMoves || {})[today];
+  // Rest days count on their own (planned, or taken with "Take today as a rest day").
+  const restDay = moved === 'off' || (!moved && days && days[day] && days[day].type === 'rest');
+  if (restDay) return { title: 'Rest day 🔥', body: 'It counts for your streak. Recovery is part of training.', url: './' };
   if (st.date === today && st.done) return { title: 'Today already counts 🔥', body: 'Nice work. See you tomorrow.', url: './' };
   // The streak at stake: what the app saw today, or yesterday's if that day counted.
   const n = st.date === today ? st.n : (st.date === yesterday && st.done ? st.n : 0);
-  // Training days count when you move; rest days also count with a weigh-in or protein.
-  const day = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][now.getDay()];
-  const days = kv.program && kv.program.days;
-  const todo = days && days[day] && days[day].type === 'rest' ? 'Move, weigh in, or hit your protein' : 'Lift, run, walk, or do yoga';
+  const todo = 'Lift, run, walk, or do yoga';
   return n > 0
     ? { title: `Keep your ${n}-day streak 🔥`, body: `Today doesn't count yet. ${todo} before midnight.`, url: './' }
     : { title: 'Start a streak today 🔥', body: `${todo} and today counts.`, url: './' };
