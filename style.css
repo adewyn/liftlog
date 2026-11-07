@@ -925,3 +925,12 @@ body.has-timer .streak-pill { visibility: hidden; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip-row button { min-height: 40px; padding: 0 14px; border-radius: 12px; background: var(--s2); color: var(--mut); font-weight: 650; box-shadow: 0 0 0 1px var(--line) inset; }
 .chip-row button.on { background: var(--s3); color: var(--tx); }
+
+.ex-tools button { white-space: nowrap; }
+.ex-tools .ex-note-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
+.ex-note-btn svg { width: 18px; height: 18px; flex: none; }
+.ex-note-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-note-btn.has { color: var(--tx); }
+.ex-notes { margin-top: 8px; }
+.ex-notes textarea { min-height: 72px; }
+.fold-sum svg { width: 15px; height: 15px; vertical-align: -2px; }
