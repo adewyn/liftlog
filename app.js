@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.12.2';
+const APP_VERSION = '2.12.3';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -141,7 +141,7 @@ function jumpFor(t, w) {
   const pct = t.kind !== 'iso' && t.body === 'upper' ? 0.04 : 0.05;
   return Math.max(step, roundTo((+w || 0) * pct, step));
 }
-const PROGRAM_V = 6;
+const PROGRAM_V = 7;
 // Brings an older saved program up to date with the trainer review (Nov 2026): wider ranges for
 // small lifts, a quad lift and an overhead press on Wednesday, and a real abs exercise. Only touches
 // exercises that still match the original program, so your own edits stay.
@@ -162,6 +162,18 @@ function migrateProgram(p) {
     [...DAYS.map(d => p.days[d]), ...(p.custom || [])].forEach(day => (day.groups || []).forEach(g => g.forEach(x => {
       if (/^chest press or dips$/i.test(x.name)) x.name = 'Chest press';
     })));
+  }
+  // v7: no two leg lifts back to back. A pull goes between them so your legs rest while your back works.
+  if (v0 < 7) {
+    const moveBefore = (d, name, before) => {
+      const day = p.days[d]; if (!day || !day.groups) return;
+      const at = n => day.groups.findIndex(g => g.some(x => keyOf(x.name) === keyOf(n)));
+      const i = at(name), j = at(before);
+      if (i < 0 || j < 0 || i < j) return;
+      const [g] = day.groups.splice(i, 1); day.groups.splice(j, 0, g);
+    };
+    moveBefore('wed', 'Row', 'Romanian deadlift');
+    moveBefore('fri', 'Pull-ups', 'Hip thrust');
   }
   p.v = PROGRAM_V;
   return true;
@@ -276,8 +288,8 @@ function defaultProgram() {
       wed: { label: 'Medium full body', type: 'strength', groups: [
         [ex('Incline DB press', 3, 8, 10, UP)],
         [ex('Leg press', 3, 8, 12, LO)],
-        [ex('Romanian deadlift', 3, 6, 10, LO)],
         [ex('Row', 3, 8, 10, UP)],
+        [ex('Romanian deadlift', 3, 6, 10, LO)],
         [ex('Seated DB shoulder press', 3, 8, 10, UP)],
         [ex('DB curl', 3, 10, 12, UP), ex('Overhead triceps extension', 3, 10, 12, UP)],
         [ex('Calf raise', 3, 12, 20, LO), ex('Cable lateral raise', 3, 12, 20, UP)],
@@ -287,8 +299,8 @@ function defaultProgram() {
       fri: { label: 'Light full body', type: 'strength', groups: [
         [ex('Chest press', 3, 12, 15, UP)],
         [ex('Bulgarian split squat', 3, 10, 12, LO, { note: 'Per leg' })],
-        [ex('Hip thrust', 3, 12, 15, LO)],
         [ex('Pull-ups', 3, null, null, UP, { note: 'Max reps' })],
+        [ex('Hip thrust', 3, 12, 15, LO)],
         [ex('Hammer curl', 3, 12, 15, UP)],
         [ex('Lateral raise', 3, 12, 20, UP), ex('Face pull', 3, 15, 20, UP)],
         [ex('Hip abduction', 3, 12, 15, LO)],
@@ -337,7 +349,7 @@ async function loadState() {
   if (!S.settings.goalV) { if (S.settings.goal === 'bulk') S.settings.goal = 'slow'; S.settings.goalV = 1; await saveSettings(); }
   S.foods = kv.foods || [];
   if (!kv.program || migrated) await saveProgram();
-  if (migrated && kv.program) S.notice = oldV >= 5 ? 'Friday\'s "Chest press or dips" is now just Chest press, since the machine is what you\'ve always logged. Your history carries over. Want dips one day? Tap ⋯ on the lift and swap it.' : oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
+  if (migrated && kv.program) S.notice = oldV >= 6 ? 'New order: no two leg lifts in a row. Wednesday\'s row now comes between leg press and RDLs, and Friday\'s pull-ups come between split squats and hip thrusts.' : oldV >= 5 ? 'Order tweak: rows and pull-ups now sit between your leg lifts on Wednesday and Friday. Also, Friday\'s "Chest press or dips" is now just Chest press, since the machine is what you\'ve always logged. Your history carries over. Want dips one day? Tap ⋯ on the lift and swap it.' : oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
   S.workouts = await DB.all('workouts');
   // 1.9 saved imported activity-only days under Sunday.
   const moved = S.workouts.filter(w => w.imported && w.dayKey === 'sun' && w.type === 'rest');
