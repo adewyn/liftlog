@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.12.1';
+const APP_VERSION = '2.12.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -25,7 +25,9 @@ const VAPID_PUBLIC = 'BA_437YE5zeBtTMqdI9k9Ek1Jl9qu4Bo9Hmuen9bQmLNGn0MwZUngKJpCJ
 // ---------- helpers ----------
 const $ = sel => document.querySelector(sel);
 const uid = p => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-const keyOf = name => String(name).trim().toLowerCase().replace(/\s+/g, ' ');
+// A renamed lift keeps its history: the new name looks up the old one's sessions.
+const KEY_ALIAS = { 'chest press': 'chest press or dips' };
+const keyOf = name => { const k = String(name).trim().toLowerCase().replace(/\s+/g, ' '); return KEY_ALIAS[k] || k; };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -139,7 +141,7 @@ function jumpFor(t, w) {
   const pct = t.kind !== 'iso' && t.body === 'upper' ? 0.04 : 0.05;
   return Math.max(step, roundTo((+w || 0) * pct, step));
 }
-const PROGRAM_V = 5;
+const PROGRAM_V = 6;
 // Brings an older saved program up to date with the trainer review (Nov 2026): wider ranges for
 // small lifts, a quad lift and an overhead press on Wednesday, and a real abs exercise. Only touches
 // exercises that still match the original program, so your own edits stay.
@@ -155,6 +157,12 @@ function migrateProgram(p) {
   }
   if (v0 < 4) migrateV4(p);
   if (v0 < 5) migrateV5(p);
+  // v6: "Chest press or dips" was always logged as the machine (dips have their own names), so it's just Chest press.
+  if (v0 < 6) {
+    [...DAYS.map(d => p.days[d]), ...(p.custom || [])].forEach(day => (day.groups || []).forEach(g => g.forEach(x => {
+      if (/^chest press or dips$/i.test(x.name)) x.name = 'Chest press';
+    })));
+  }
   p.v = PROGRAM_V;
   return true;
 }
@@ -277,7 +285,7 @@ function defaultProgram() {
       ] },
       thu: { label: 'Yoga + easy walk/run', type: 'cardio' },
       fri: { label: 'Light full body', type: 'strength', groups: [
-        [ex('Chest press or dips', 3, 12, 15, UP)],
+        [ex('Chest press', 3, 12, 15, UP)],
         [ex('Bulgarian split squat', 3, 10, 12, LO, { note: 'Per leg' })],
         [ex('Hip thrust', 3, 12, 15, LO)],
         [ex('Pull-ups', 3, null, null, UP, { note: 'Max reps' })],
@@ -329,7 +337,7 @@ async function loadState() {
   if (!S.settings.goalV) { if (S.settings.goal === 'bulk') S.settings.goal = 'slow'; S.settings.goalV = 1; await saveSettings(); }
   S.foods = kv.foods || [];
   if (!kv.program || migrated) await saveProgram();
-  if (migrated && kv.program) S.notice = oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
+  if (migrated && kv.program) S.notice = oldV >= 5 ? 'Friday\'s "Chest press or dips" is now just Chest press, since the machine is what you\'ve always logged. Your history carries over. Want dips one day? Tap ⋯ on the lift and swap it.' : oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
   S.workouts = await DB.all('workouts');
   // 1.9 saved imported activity-only days under Sunday.
   const moved = S.workouts.filter(w => w.imported && w.dayKey === 'sun' && w.type === 'rest');
@@ -343,6 +351,10 @@ async function loadState() {
   // Today's workout may already be saved with the hack squat in it: swap any not started yet.
   S.workouts.filter(w => w.date === todayStr()).forEach(w => (w.exercises || []).forEach(e => {
     if (/^hack squat$/i.test(e.name) && !e.sets.some(x => x.done)) { e.name = 'Leg press'; e.key = keyOf(e.name); fillSets(e, w); persist(w); }
+  }));
+  // Same for a saved, unstarted "Chest press or dips" (the key stays, so history carries over).
+  S.workouts.filter(w => w.date >= todayStr()).forEach(w => (w.exercises || []).forEach(e => {
+    if (/^chest press or dips$/i.test(e.name) && !e.sets.some(x => x.done)) { e.name = 'Chest press'; persist(w); }
   }));
 }
 
