@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.12.3';
+const APP_VERSION = '2.13.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1229,9 +1229,43 @@ function tick(w, i, j) {
   const s = w.exercises[i].sets[j];
   if (s.done) { s.done = false; persist(w); render(); return; }
   if (s.w === '' || s.r === '') { openSetSheet(w, i, j); return; }
+  logInOrder(w, i, j);
+}
+// Log a set. A lift done ahead of ones not started yet moves up to sit after what you've done, so the
+// list reads in the order you did it. The workout keeps a note of the move for the nightly trainer.
+function logInOrder(w, i, j) {
+  const ni = isLive(w) ? moveToLogged(w, i) : i;
+  if (ni !== i) {
+    const a = document.querySelector(setSel(w, i, j)), t = a && a.getBoundingClientRect().top;
+    logSet(w, ni, j);
+    const b = document.querySelector(setSel(w, ni, j));
+    if (a && b) window.scrollBy(0, b.getBoundingClientRect().top - t);
+    const next = nextSet(w, ni, j);
+    if (next) showAboveTimer(setSel(w, ...next));
+    return;
+  }
   const next = nextSet(w, i, j);
   keepInPlace(next ? setSel(w, ...next) : setSel(w, i, j), () => logSet(w, i, j));
   if (next) showAboveTimer(setSel(w, ...next));
+}
+// Returns the lift's new index. Moves its whole superset, and only on the first set logged for it.
+function moveToLogged(w, i) {
+  const ex = w.exercises, g = ex[i].group;
+  const started = e => e.sets.some(x => x.done);
+  if (ex.some(e => e.group === g && started(e))) return i;
+  const first = ex.findIndex(e => e.group === g);
+  let lastDone = -1;
+  ex.forEach((e, k) => { if (k < first && started(e)) lastDone = k; });
+  const skipped = ex.slice(lastDone + 1, first).filter(e => !started(e));
+  if (!skipped.length) return i;
+  const mine = ex.filter(e => e.group === g), key = ex[i].key;
+  const rest = ex.filter(e => e.group !== g);
+  rest.splice(lastDone + 1, 0, ...mine);
+  w.exercises = rest;
+  w.reorder = w.reorder || [];
+  const skippedGroups = [...new Set(skipped.map(e => e.group))].map(id => skipped.filter(e => e.group === id).map(e => e.name).join(' + '));
+  w.reorder.push({ lift: mine.map(e => e.name).join(' + '), ahead: skippedGroups, at: Date.now() });
+  return w.exercises.findIndex(e => e.key === key && e.group === g);
 }
 // The next set to do: the rest of this round in a superset (A1, B1, then A2…), then the next exercise.
 function nextSet(w, i, j) {
@@ -4109,6 +4143,16 @@ function coachOp(prog, c) {
     day.groups[f.gi][f.ii] = x;
     return `${D}: ${old} → ${to}, ${presTxt(x)}`;
   }
+  // Move a lift (with its superset partner) to go right after another, or first.
+  if (c.op === 'move') {
+    const to = c.after && coachFind(day, c.after);
+    if (!to && !c.first) return null;
+    if (to && to.gi === f.gi) return null;
+    const [g] = day.groups.splice(f.gi, 1);
+    const at = to ? day.groups.findIndex(x => x.includes(to.x)) + 1 : 0;
+    day.groups.splice(at, 0, g);
+    return `${D}: ${f.x.name} now comes ${to ? `right after ${to.x.name}` : 'first'}`;
+  }
   if (c.op === 'set') {
     const before = presTxt(f.x);
     shape(f.x);
@@ -5072,9 +5116,7 @@ const ACT = {
     const wasDone = s.done, i = S.sheet.i, j = S.sheet.j;
     closeSheet();
     if (wasDone || (d && d.only)) { persist(w); render(); return; }
-    const next = nextSet(w, i, j);
-    keepInPlace(next ? setSel(w, ...next) : setSel(w, i, j), () => logSet(w, i, j));
-    if (next) showAboveTimer(setSel(w, ...next));
+    logInOrder(w, i, j);
   },
   'ss-only': () => ACT['ss-save']({ only: true }),
 
