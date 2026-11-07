@@ -914,3 +914,14 @@ body.has-timer .streak-pill { visibility: hidden; }
   .lv-conf, .lv-sad { animation: none; display: none; }
   .lv-pop, .lv-pop .lv-box, .lv-pop .lv-num { animation: none; transform: none; }
 }
+
+/* At home list, habit card, and "not for you" reasons (2.14) */
+.home-head { display: flex; flex-direction: column; gap: 2px; margin: 22px 4px 10px; }
+.home-head b { font-size: 17px; font-weight: 750; }
+.home-head span { font-size: 13px; color: var(--mut); }
+.habit-card b { display: block; margin-bottom: 4px; }
+.habit-card .btn-row { flex-wrap: wrap; margin-top: 12px; }
+.habit-card .btn-row .btn { flex: 1 1 auto; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-row button { min-height: 40px; padding: 0 14px; border-radius: 12px; background: var(--s2); color: var(--mut); font-weight: 650; box-shadow: 0 0 0 1px var(--line) inset; }
+.chip-row button.on { background: var(--s3); color: var(--tx); }

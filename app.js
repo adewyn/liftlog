@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.13.1';
+const APP_VERSION = '2.14.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS = {
   proteinMode: 'auto', proteinPerLb: 0.85, proteinTarget: 155,
   reminder: { on: false, time: '09:00', streakOn: false, streakTime: '14:00', measureOn: false, measureTime: '10:00', id: null },
   trainer: { on: false, k: null, lastSync: 0, lastId: null, photos: [] },
+  prefs: {}, block: null,
 };
 // The weigh-in reminder server (server/push in this folder) and its public key.
 const PUSH_URL = 'https://liftlog-push.sporebound.workers.dev';
@@ -26,7 +27,51 @@ const VAPID_PUBLIC = 'BA_437YE5zeBtTMqdI9k9Ek1Jl9qu4Bo9Hmuen9bQmLNGn0MwZUngKJpCJ
 const $ = sel => document.querySelector(sel);
 const uid = p => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 // A renamed lift keeps its history: the new name looks up the old one's sessions.
-const KEY_ALIAS = { 'chest press': 'chest press or dips' };
+const KEY_ALIAS = { 'chest press': 'chest press or dips', 'wide-grip lat pulldown': 'lat pulldown' };
+// Close cousins: every 6-week block, a smaller lift moves to the next one in its family (see rotateBlock).
+// Big lifts stay put so they can keep climbing. Names here are ones the muscle map knows.
+const VARIANTS = [
+  ['Cable fly', 'Pec deck', 'Low-to-high cable fly'],
+  ['Bar curl', 'EZ-bar curl', 'Cable curl'],
+  ['DB curl', 'Incline DB curl', 'Preacher curl'],
+  ['Hammer curl', 'Rope hammer curl', 'Cross-body hammer curl'],
+  ['Rope pushdown', 'Straight-bar pushdown', 'V-bar pushdown'],
+  ['Overhead triceps extension', 'Cable overhead triceps extension', 'EZ-bar skull crusher'],
+  ['Lateral raise', 'Cable lateral raise', 'Machine lateral raise', 'Lean-away lateral raise'],
+  ['Reverse pec deck', 'Rear delt cable fly', 'Bent-over rear delt raise'],
+  ['Hamstring curl', 'Lying leg curl'],
+  ['Calf raise', 'Seated calf raise', 'Single-leg calf raise'],
+  ['Cable crunch', 'Ab crunch machine', 'Decline sit-up'],
+  ['Row', 'Chest-supported row', 'Seated cable row'],
+  ['Seated DB shoulder press', 'Shoulder press machine'],
+  ['Wide-grip lat pulldown', 'Close-grip lat pulldown'],
+  ['Pull-ups', 'Chin-ups'],
+  ['Push-ups', 'Decline push-ups'],
+  ['Mace 360s', 'Mace whirls', 'Mace rotations'],
+  ['Flutter kicks', 'High knee planks', 'Dead bug', 'Hollow hold'],
+];
+const familyOf = name => VARIANTS.find(f => f.some(n => keyOf(n) === keyOf(name))) || null;
+const isHome = e => !!e && e.place === 'home';
+// Your rep cap (Nov 7): no weighted lift goes past 12. Big lifts go heavy Monday 6–8, medium Wednesday
+// 8–10, light Friday 10–12. Isolation lifts (curls, pushdowns, flys) sit a step higher, 8–10 Monday and
+// 10–12 after. Small lifts (raises, rear delts, calves, abs, the mace) are 10–12 any day. Bodyweight
+// moves, carries, and max-rep sets keep their own counts.
+const REP_CAP = 12;
+const SMALL_LIFT = /raise|rear delt|reverse (pec|fly)|face pull|calf|crunch|pallof|sit-?up|\babs?\b|mace|abduct|cuban|external rot|pull-?apart/i;
+const DAY_REPS = { mon: [6, 8], wed: [8, 10], fri: [10, 12] }, ISO_REPS = { mon: [8, 10], wed: [10, 12], fri: [10, 12] };
+const capExempt = x => x.unit === 'steps' || x.min == null || NO_WEIGHT.test(x.name);
+function applyRepRule(p) {
+  Object.entries(p.days || {}).forEach(([d, day]) => (day.type === 'strength' ? day.groups || [] : []).forEach(g => g.forEach(x => {
+    if (capExempt(x)) return;
+    const r = SMALL_LIFT.test(x.name) ? [10, 12] : (classify(x).kind === 'iso' ? ISO_REPS : DAY_REPS)[d];
+    if (r) { x.min = r[0]; x.max = r[1]; } else if ((x.max ?? 0) > REP_CAP) { x.max = REP_CAP; x.min = Math.min(x.min, REP_CAP); }
+  })));
+  (p.custom || []).forEach(c => (c.groups || []).forEach(g => g.forEach(x => {
+    if (!capExempt(x) && (x.max ?? 0) > REP_CAP) { x.max = REP_CAP; x.min = Math.min(x.min, REP_CAP); }
+  })));
+  return p;
+}
+const listAnd = a => (a.length <= 1 ? a[0] || '' : a.length === 2 ? `${a[0]} and ${a[1]}` : `${a.slice(0, -1).join(', ')}, and ${a[a.length - 1]}`);
 const keyOf = name => { const k = String(name).trim().toLowerCase().replace(/\s+/g, ' '); return KEY_ALIAS[k] || k; };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pad = n => String(n).padStart(2, '0');
@@ -141,7 +186,7 @@ function jumpFor(t, w) {
   const pct = t.kind !== 'iso' && t.body === 'upper' ? 0.04 : 0.05;
   return Math.max(step, roundTo((+w || 0) * pct, step));
 }
-const PROGRAM_V = 7;
+const PROGRAM_V = 9;
 // Brings an older saved program up to date with the trainer review (Nov 2026): wider ranges for
 // small lifts, a quad lift and an overhead press on Wednesday, and a real abs exercise. Only touches
 // exercises that still match the original program, so your own edits stay.
@@ -175,6 +220,8 @@ function migrateProgram(p) {
     moveBefore('wed', 'Row', 'Romanian deadlift');
     moveBefore('fri', 'Pull-ups', 'Hip thrust');
   }
+  if (v0 < 8) migrateV8(p);
+  if (v0 < 9) applyRepRule(p);
   p.v = PROGRAM_V;
   return true;
 }
@@ -201,6 +248,32 @@ function migrateV4(p) {
       const at = gs.findIndex(g => g.some(x => /split squat|lunge|squat|leg press/i.test(x.name)));
       gs.splice(at >= 0 ? at + 1 : gs.length, 0, [ex('Hip thrust', 3, 12, 15, LO)]);
     }
+  }
+}
+// v8 (Nov 7, 2026): wide and close-grip pulldowns are separate lifts (wide keeps the old history).
+// Pull-ups move home, where nobody's watching; the gym gets a close-grip pulldown in their place.
+// Each lifting day gets a short at-home list from moves you've done before: pull-ups, push-ups, the
+// mace, and floor abs. Only touches lifts that still match the plan before.
+function migrateV8(p) {
+  const day = d => (p.days[d] && p.days[d].type === 'strength' && Array.isArray(p.days[d].groups) ? p.days[d] : null);
+  const has = (d, n) => d.groups.some(g => g.some(x => keyOf(x.name) === keyOf(n)));
+  const home = (name, sets, min, max, extra = {}) => [ex(name, sets, min, max, UP, { place: 'home', ...extra })];
+  const mon = day('mon'), wed = day('wed'), fri = day('fri');
+  if (mon) {
+    mon.groups.forEach(g => g.forEach(x => { if (/^lat pulldown$/i.test(x.name)) x.name = 'Wide-grip lat pulldown'; }));
+    if (!has(mon, 'Mace 360s')) mon.groups.push(home('Mace 360s', 2, 8, 10, { note: 'Per side' }));
+    if (!has(mon, 'Flutter kicks')) mon.groups.push(home('Flutter kicks', 2, 20, 30));
+  }
+  if (wed && !has(wed, 'Pull-ups')) {
+    wed.groups.push(home('Pull-ups', 3, null, null, { note: 'Max reps' }));
+    if (!has(wed, 'High knee planks')) wed.groups.push(home('High knee planks', 2, 10, 15));
+  }
+  if (fri) {
+    fri.groups.forEach(g => g.forEach((x, k) => {
+      if (/^pull-?ups$/i.test(x.name) && x.place !== 'home') g[k] = ex('Close-grip lat pulldown', 3, 10, 12, UP);
+    }));
+    if (!has(fri, 'Push-ups')) fri.groups.push(home('Push-ups', 2, null, null, { note: 'Max reps' }));
+    if (!has(fri, 'Dead bug')) fri.groups.push(home('Dead bug', 2, 8, 12, { note: 'Per side' }));
   }
 }
 // v5 (Nov 2026 trainer audit): your priorities get more direct work. Side delts train all three days,
@@ -271,18 +344,20 @@ function migrateV2(p) {
   }
 }
 function defaultProgram() {
-  return {
+  return applyRepRule({
     v: PROGRAM_V,
     days: {
       mon: { label: 'Heavy full body', type: 'strength', groups: [
         [ex('Low-incline bench press', 3, 4, 6, UP, { note: 'Bench at 15–30°' })],
         [ex('Hip thrust', 3, 6, 8, LO)],
-        [ex('Lat pulldown', 3, 6, 8, UP)],
+        [ex('Wide-grip lat pulldown', 3, 6, 8, UP)],
         [ex('Cable fly', 2, 10, 12, UP)],
         [ex('Leg press', 3, 10, 12, LO)],
         [ex('Bar curl', 3, 8, 12, UP), ex('Rope pushdown', 3, 8, 12, UP)],
         [ex('Lateral raise', 3, 12, 20, UP), ex('Reverse pec deck', 3, 15, 20, UP)],
         [ex('Hamstring curl', 3, 10, 12, LO, { note: 'Seated' })],
+        [ex('Mace 360s', 2, 8, 10, UP, { note: 'Per side', place: 'home' })],
+        [ex('Flutter kicks', 2, 20, 30, UP, { place: 'home' })],
       ] },
       tue: { label: 'Yoga + walk/run', type: 'cardio' },
       wed: { label: 'Medium full body', type: 'strength', groups: [
@@ -294,23 +369,27 @@ function defaultProgram() {
         [ex('DB curl', 3, 10, 12, UP), ex('Overhead triceps extension', 3, 10, 12, UP)],
         [ex('Calf raise', 3, 12, 20, LO), ex('Cable lateral raise', 3, 12, 20, UP)],
         [ex('Cable crunch', 3, 10, 15, UP), ex('Pallof press', 2, 10, 12, UP, { note: 'Per side' })],
+        [ex('Pull-ups', 3, null, null, UP, { note: 'Max reps', place: 'home' })],
+        [ex('High knee planks', 2, 10, 15, UP, { place: 'home' })],
       ] },
       thu: { label: 'Yoga + easy walk/run', type: 'cardio' },
       fri: { label: 'Light full body', type: 'strength', groups: [
         [ex('Chest press', 3, 12, 15, UP)],
         [ex('Bulgarian split squat', 3, 10, 12, LO, { note: 'Per leg' })],
-        [ex('Pull-ups', 3, null, null, UP, { note: 'Max reps' })],
+        [ex('Close-grip lat pulldown', 3, 10, 12, UP)],
         [ex('Hip thrust', 3, 12, 15, LO)],
         [ex('Hammer curl', 3, 12, 15, UP)],
         [ex('Lateral raise', 3, 12, 20, UP), ex('Face pull', 3, 15, 20, UP)],
         [ex('Hip abduction', 3, 12, 15, LO)],
         [ex('Calf raise', 3, 12, 20, LO)],
         [ex("Farmer's carry", 3, 40, 60, UP, { unit: 'steps' })],
+        [ex('Push-ups', 2, null, null, UP, { note: 'Max reps', place: 'home' })],
+        [ex('Dead bug', 2, 8, 12, UP, { note: 'Per side', place: 'home' })],
       ] },
       sat: { label: 'Rest', type: 'rest' },
       sun: { label: 'Rest', type: 'rest' },
     },
-  };
+  });
 }
 
 // ---------- state ----------
@@ -348,8 +427,15 @@ async function loadState() {
   // Trainer check-up (Nov 2026): lean bulk aimed faster than the slow gain you asked for, so it moves to Slow gain once.
   if (!S.settings.goalV) { if (S.settings.goal === 'bulk') S.settings.goal = 'slow'; S.settings.goalV = 1; await saveSettings(); }
   S.foods = kv.foods || [];
+  // You told me (Nov 7): no pull-ups at the gym, people watching. They live in your At home list.
+  if (!S.settings.prefsV) {
+    S.settings.prefs = { ...(S.settings.prefs || {}), 'pull-ups': { no: 'watching', at: Date.now(), ...((S.settings.prefs || {})['pull-ups'] || {}) } };
+    S.settings.block = S.settings.block || { start: '2026-11-09', n: 1, log: [] };
+    S.settings.prefsV = 1; await saveSettings();
+  }
+  if (!S.settings.block) { S.settings.block = { start: weekStart(todayStr()), n: 1, log: [] }; await saveSettings(); }
   if (!kv.program || migrated) await saveProgram();
-  if (migrated && kv.program) S.notice = oldV >= 6 ? 'New order: no two leg lifts in a row. Wednesday\'s row now comes between leg press and RDLs, and Friday\'s pull-ups come between split squats and hip thrusts.' : oldV >= 5 ? 'Order tweak: rows and pull-ups now sit between your leg lifts on Wednesday and Friday. Also, Friday\'s "Chest press or dips" is now just Chest press, since the machine is what you\'ve always logged. Your history carries over. Want dips one day? Tap ⋯ on the lift and swap it.' : oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
+  if (migrated && kv.program) S.notice = oldV >= 8 ? 'Rep ranges now top out at 12: heavy Monday 6–8, medium Wednesday 8–10, light Friday 10–12, and small lifts 10–12. Bodyweight moves keep their own counts.' : oldV >= 7 ? 'Rep ranges now top out at 12 (Mon 6–8, Wed 8–10, Fri 10–12, small lifts 10–12). Also new: an At home list on each lifting day, pull-ups live there now, and Friday\'s gym slot is a close-grip pulldown.' : oldV >= 6 ? 'New order: no two leg lifts in a row. Wednesday\'s row now comes between leg press and RDLs, and Friday\'s pull-ups come between split squats and hip thrusts.' : oldV >= 5 ? 'Order tweak: rows and pull-ups now sit between your leg lifts on Wednesday and Friday. Also, Friday\'s "Chest press or dips" is now just Chest press, since the machine is what you\'ve always logged. Your history carries over. Want dips one day? Tap ⋯ on the lift and swap it.' : oldV >= 4 ? 'Trainer check-up: side delts now train all three days, Monday\'s heavy press is low-incline for your upper chest, and Monday adds rear delts and a seated hamstring curl. Friday is trimmed to 10 lifts, and hip abduction moves from Wednesday to Friday. Change anything in More.' : oldV >= 3 ? 'New week shape: heavy Monday (fewer reps, more weight), medium Wednesday, and light Friday (more reps), plus hip thrusts on Friday too. Weights adjust on their own. Change anything in More.' : oldV >= 2 ? "Wednesday's hack squat is now the leg press, since your gym doesn't have a hack squat machine." : 'Program updated from the trainer review: a quad lift, an overhead press, and cable crunches on Wednesday, plus wider rep ranges for raises, calves, and carries. Change anything in More.';
   S.workouts = await DB.all('workouts');
   // 1.9 saved imported activity-only days under Sunday.
   const moved = S.workouts.filter(w => w.imported && w.dayKey === 'sun' && w.type === 'rest');
@@ -364,6 +450,39 @@ async function loadState() {
   S.workouts.filter(w => w.date === todayStr()).forEach(w => (w.exercises || []).forEach(e => {
     if (/^hack squat$/i.test(e.name) && !e.sets.some(x => x.done)) { e.name = 'Leg press'; e.key = keyOf(e.name); fillSets(e, w); persist(w); }
   }));
+  // Nov 7: Friday's pulldown today was the close grip, so it starts that lift's own history.
+  if (!S.settings.gripFix) {
+    S.workouts.filter(w => w.date === todayStr() && w.dayKey === 'fri').forEach(w => (w.exercises || []).forEach(e => {
+      if (/^lat pulldown$/i.test(e.name) && !e.makeUp) { e.name = 'Close-grip lat pulldown'; e.key = keyOf(e.name); if (!e.sets.some(x => x.done)) fillSets(e, w); persist(w); }
+    }));
+    S.settings.gripFix = 1; saveSettings();
+  }
+  // The At home list is new (2.14): today's workout, already saved, gets its day's home lifts too.
+  if (!S.settings.homeAdd) {
+    S.workouts.filter(w => w.date === todayStr() && w.type === 'strength').forEach(w => {
+      const plan = planOf(w.dayKey);
+      let g = Math.max(-1, ...w.exercises.map(e => +e.group || 0)) + 1;
+      (plan && plan.groups || []).forEach(gr => gr.filter(x => x.place === 'home' && !w.exercises.some(e => e.key === keyOf(x.name))).forEach(x => w.exercises.push(sessionExercise(x, g++, w))));
+      persist(w);
+    });
+    S.settings.homeAdd = 1; saveSettings();
+  }
+  // The 12-rep cap (2.14): today's lifts not started yet take their new ranges.
+  if (!S.settings.repFix) {
+    S.workouts.filter(w => w.date === todayStr() && w.type === 'strength').forEach(w => {
+      const plan = planOf(w.dayKey);
+      (w.exercises || []).forEach(e => {
+        if (e.sets.some(x => x.done) || !e.target || capExempt({ ...e.target, name: e.name })) return;
+        const at = plan && e.pid && findPlanItem(plan, e.pid), x = at && at.g[at.k];
+        const r = x ? [x.min, x.max] : SMALL_LIFT.test(e.name) ? [10, 12] : (e.target.kind === 'iso' ? ISO_REPS : DAY_REPS)[w.dayKey] || [e.target.min, Math.min(e.target.max, REP_CAP)];
+        if (r[0] === e.target.min && r[1] === e.target.max) return;
+        e.target = { ...e.target, min: r[0], max: r[1] }; fillSets(e, w);
+      });
+      persist(w);
+    });
+    S.settings.repFix = 1; saveSettings();
+  }
+  rotateBlock();
   // Same for a saved, unstarted "Chest press or dips" (the key stays, so history carries over).
   S.workouts.filter(w => w.date >= todayStr()).forEach(w => (w.exercises || []).forEach(e => {
     if (/^chest press or dips$/i.test(e.name) && !e.sets.some(x => x.done)) { e.name = 'Chest press'; persist(w); }
@@ -493,6 +612,12 @@ function coachPlan(t, recent, opts = {}) {
   const fill = v => Array(t.sets).fill(v);
   // No rep target (like max-rep pull-ups): build total reps, then add weight once you reach about 9 a set.
   if (t.min == null && t.max == null) {
+    // Bodyweight (often at home, with no weights around): keep building reps, compared over today's set count.
+    if (!top) {
+      const n = Math.min(t.sets, reps.length), total = sum(reps.slice(0, n)), per = n ? total / n : 0;
+      const tip = per >= 20 ? ' Getting easy? Slow the lowering to 3 seconds, or try a harder version.' : reps.length && Math.max(...reps) < 5 ? ' Under 5 a set? A band or slow lowering reps help.' : '';
+      return plan('beat', fill(0), Array.from({ length: t.sets }, (_, k) => at(reps, k)), `Beat ${total} ${unit} total${n < reps.length ? ` across ${n} sets` : ''}. Just one more.${tip}`);
+    }
     const total = sum(reps);
     if (unit === 'reps' && last.sets.length >= t.sets && total >= 9 * t.sets && opts.energy !== 'low') {
       const w = round2(top + jumpFor(t, top));
@@ -600,7 +725,7 @@ function adjustRest(w, e, j) {
 function sessionExercise(x, group, w) {
   classify(x);
   const e = {
-    key: keyOf(x.name), name: x.name, group, pid: x.id || null,
+    key: keyOf(x.name), name: x.name, group, pid: x.id || null, ...(x.place === 'home' ? { place: 'home' } : {}),
     target: { sets: x.sets, min: x.min, max: x.max, inc: x.inc, kind: x.kind, body: x.body, stepSet: true, unit: x.unit || 'reps', note: x.note || '' },
     sets: [],
   };
@@ -615,7 +740,7 @@ function sessionExercise(x, group, w) {
 // your flat bench (a little less if that bench was a while ago).
 const FIRST_FROM = [[/incline (bench|barbell)/i, 'Bench press', 0.85]];
 function firstFrom(e, t, w) {
-  const f = FIRST_FROM.find(([re]) => re.test(e.name));
+  const f = FIRST_FROM.find(([re]) => re.test(e.name)) || familyStart(e, w);
   if (!f || t.min == null) return null;
   const h = recentPerf(keyOf(f[1]), w, 1)[0];
   const best = h ? Math.max(0, ...h.sets.filter(x => +x.w).map(x => e1rm(+x.w, Math.min(+x.r || 0, 20)))) : 0;
@@ -624,13 +749,23 @@ function firstFrom(e, t, w) {
   const wNew = Math.max(step, Math.floor(best * pct / (1 + aim / 30) / step) * step), fill = v => Array(t.sets).fill(v);
   return { kind: 'hold', ws: fill(wNew), w: wNew, from: 0, prev: null, reps: fill(aim), note: `First time: ${wNew} lb for ${aim}, about ${Math.round(f[2] * 100)}% of your ${f[1].toLowerCase()}. Adjust after the first set if it's off.` };
 }
+// A new cousin in a lift's family (a new block's curl, say) starts at about 90% of the cousin you've
+// done most recently in the last 3 months.
+function familyStart(e, w) {
+  const fam = familyOf(e.name);
+  if (!fam) return null;
+  const cands = fam.filter(n => keyOf(n) !== keyOf(e.name)).map(n => ({ n, h: recentPerf(keyOf(n), w, 1)[0] }))
+    .filter(c => c.h && daysBetween(c.h.date, w.date) <= 90 && c.h.sets.some(x => +x.w > 0)).sort((a, b) => b.h.date.localeCompare(a.h.date));
+  return cands.length ? [null, cands[0].n, 0.9] : null;
+}
 // Weight-stack machines logged by pin number ("Pec fly (stack #)", or "stack" in the lift's note) go up one pin at a time.
 const isStack = (name, note) => /\(stack ?#?\)/i.test(name || '') || /\bstack\b/i.test(note || '');
-// The target a lift is really aiming for today: shoulder care stays at 10 to 15 reps, lifts that cause
-// pressure move to lighter sets of 10 to 15, and stack machines step one pin.
+// The target a lift is really aiming for today: shoulder care stays at 10 to 12 reps, lifts that cause
+// pressure move to lighter sets of 8 to 12 (never past 12, your cap), and stack machines step one pin.
 function effTarget(e) {
   const base = targetOf(e);
-  let t = REHAB_WORDS.test(e.name) || careOf(e.name) === 'pressure' ? { ...base, min: Math.max(base.min ?? 10, 10), max: Math.max(base.max ?? 15, 15) } : base;
+  const lo = REHAB_WORDS.test(e.name) ? 10 : 8;
+  let t = REHAB_WORDS.test(e.name) || careOf(e.name) === 'pressure' ? { ...base, min: Math.max(base.min ?? lo, lo), max: Math.max(Math.min(base.max ?? REP_CAP, REP_CAP), lo) } : base;
   if (isStack(e.name, base.note)) t = { ...t, inc: 1, stack: true };
   return t;
 }
@@ -663,7 +798,7 @@ function fillSets(e, w) {
     if (care === 'pressure' && top && Math.max(...last.map(s => +s.r)) < 10) {
       // Moving to lighter sets: about 15% less so 10 reps feel smooth.
       const lw = Math.min(plan.w || Infinity, Math.max(step, roundTo(top * 0.85, step)));
-      plan = { ...plan, kind: 'down', ws: plan.ws.map(() => lw), w: lw, reps: plan.reps.map(() => 10), note: `${lw} lb today so 10 to 15 reps feel smooth.` };
+      plan = { ...plan, kind: 'down', ws: plan.ws.map(() => lw), w: lw, reps: plan.reps.map(() => 10), note: `${lw} lb today so 8 to 12 reps feel smooth.` };
     } else if (plan.w > top + step) {
       // No big jumps on a lift that bothers you: one step at a time.
       plan = { ...plan, ws: plan.ws.map(x => Math.min(x, top + step)), w: Math.min(plan.w, top + step), note: `Up one step to ${round2(top + step)} lb, aim for ${t.min ?? t.max}+.` };
@@ -688,7 +823,7 @@ function fillSets(e, w) {
     const r = plan ? plan.reps[Math.min(k, plan.reps.length - 1)] : null;
     const pr = plan && (low || deload) && r > 3 ? r - 2 : r;
     return plan ? { w: plan.ws[k], r: pr, done: false, pw: plan.ws[k], pr }
-      : { w: '', r: t.min ?? t.max ?? '', done: false };
+      : { w: NO_WEIGHT.test(e.name) ? 0 : '', r: t.min ?? t.max ?? '', done: false };
   });
 }
 
@@ -754,7 +889,7 @@ function comeback(t, recent, date) {
 // Lifts you've marked as bothering you (More options on an exercise), by name.
 const careOf = name => (S.settings.care || {})[keyOf(name)] || null;
 const CARE_CUES = {
-  pressure: 'Easy does it: breathe out as you push, no big breath-hold, 10 to 15 smooth reps. Aches? Swap it.',
+  pressure: 'Easy does it: breathe out as you push, no big breath-hold, 8 to 12 smooth reps. Aches? Swap it.',
   joint: 'Smooth, controlled reps. Stop if it hurts.',
   cramp: 'Cramped here before. A bit lighter and slower, sip water between sets.',
 };
@@ -830,7 +965,7 @@ const MUSCLE_RULES = [
   [/lateral raise|side raise|square raise|upright row/i, { side: 1 }, ['back']],
   [/overhead press|shoulder press|military|arnold press|standing (bar |barbell )?press|\bohp\b/i, { shoulders: 1, side: 0.5, triceps: 0.5 }, ['chest', 'back']],
   [/pallof|woodchop/i, { abs: 1 }, ['glutes', 'shoulders']],
-  [/hanging (knee|leg) raise|leg raise|ab wheel|rollout|flutter kick|mountain climber|v-?up|hollow/i, { abs: 1 }, ['back']],
+  [/hanging (knee|leg) raise|leg raise|ab wheel|rollout|flutter kick|mountain climber|v-?up|hollow|dead ?bug/i, { abs: 1 }, ['back']],
   [/russian twist|dead ?bug|bird ?dog/i, { abs: 1 }],
   [/crunch|plank|\babs\b|sit-?up/i, { abs: 1 }],
   [/calf/i, { calves: 1 }],
@@ -1254,19 +1389,156 @@ function sortByLogged(w) {
   w.exercises.forEach(e => { let g = groups.find(x => x.id === e.group); if (!g) groups.push(g = { id: e.group, items: [] }); g.items.push(e); });
   const started = g => g.items.some(e => e.sets.some(x => x.done));
   const firstAt = g => Math.min(...g.items.flatMap(e => e.sets.filter(x => x.done).map(x => +x.at || Infinity)));
-  const doneG = groups.filter(started);
-  const next = [...doneG].sort((a, b) => (firstAt(a) === firstAt(b) ? 0 : firstAt(a) - firstAt(b))).concat(groups.filter(g => !started(g)));
+  const home = g => g.items.some(isHome);
+  const gym = groups.filter(g => !home(g)), doneG = gym.filter(started);
+  const next = [...doneG].sort((a, b) => (firstAt(a) === firstAt(b) ? 0 : firstAt(a) - firstAt(b))).concat(gym.filter(g => !started(g)), groups.filter(home));
   if (next.every((g, k) => g === groups[k])) return false;
   const name = g => g.items.map(e => e.name).join(' + ');
   w.reorder = w.reorder || [];
   next.forEach((g, k) => {
-    if (!started(g)) return;
+    if (!started(g) || home(g)) return;
     const passed = groups.slice(0, groups.indexOf(g)).filter(h => next.indexOf(h) > k);
     if (passed.length && !w.reorder.some(r => r.lift === name(g))) w.reorder.push({ lift: name(g), ahead: passed.map(name), at: Number.isFinite(firstAt(g)) ? firstAt(g) : Date.now() });
   });
   w.exercises = next.flatMap(g => g.items);
   return true;
 }
+// ---------- what you like and what you don't ----------
+// Every workout keeps what you swapped away (w.swaps), dropped (w.dropped), and left untouched. Over the
+// last 6 weeks that adds up to a habit per lift. A lift you keep skipping gets a "change it for good?"
+// card; one you keep choosing counts as a favorite (first in swap lists, never rotated out). "Not for
+// me" on a lift records why, and the plan, swaps, and block rotation all steer around it.
+const PREF_WHY = { watching: 'People watching', hurts: 'Hurts or feels off', boring: 'Boring', busy: "Machine's always taken", meh: "Just don't like it" };
+const prefOf = name => (S.settings.prefs || {})[keyOf(name)] || {};
+function setPref(name, patch) {
+  const k = keyOf(name), all = { ...(S.settings.prefs || {}) };
+  all[k] = { ...(all[k] || {}), ...patch };
+  Object.keys(all[k]).forEach(f => all[k][f] == null && delete all[k][f]);
+  S.settings.prefs = all; saveSettings();
+}
+// "People watching" on a bodyweight move sends it home, so it's only off the table at the gym.
+const disliked = (name, atHome) => { const p = prefOf(name); return !!p.no && !(atHome && p.no === 'watching' && BODYWEIGHT.test(name)); };
+function liftHabits(since) {
+  const from = since || addDays(todayStr(), -42), out = {};
+  const get = k => (out[k] = out[k] || { done: 0, skipped: 0, swapped: 0, removed: 0, added: 0, to: {} });
+  S.workouts.filter(w => w.type === 'strength' && w.date >= from && w.date < todayStr() && hasWork(w)).forEach(w => {
+    const swapped = new Map((w.swaps || []).map(x => [keyOf(x.from), x.to]));
+    (w.exercises || []).forEach(e => {
+      const h = get(e.key);
+      if (doneSets(e).length) { h.done++; if (!e.pid && !e.makeUp) h.added++; } else h.skipped++;
+    });
+    (w.dropped || []).forEach(k => {
+      if ((w.exercises || []).some(e => e.key === k)) return;
+      const h = get(k), to = swapped.get(k);
+      if (to) { h.swapped++; h.to[to] = (h.to[to] || 0) + 1; } else h.removed++;
+    });
+  });
+  Object.values(out).forEach(h => { h.missed = h.skipped + h.swapped + h.removed; });
+  return out;
+}
+const favored = (name, H) => { const h = (H || liftHabits())[keyOf(name)]; return !!prefOf(name).like || !!(h && h.done >= 3 && !h.missed) || !!(h && h.added >= 2); };
+// The lift to bring up on today's card, if any: skipped, swapped, or dropped 3+ times in 6 weeks and done
+// at most half as often, not already marked, and not waved off in the last 6 weeks.
+function habitNudge(w) {
+  if (!w || w.date !== todayStr() || w.type !== 'strength') return null;
+  const H = liftHabits();
+  for (const e of w.exercises || []) {
+    const h = H[e.key], pr = prefOf(e.name);
+    if (!h || e.sets.some(x => x.done) || pr.no || (pr.keepUntil && pr.keepUntil > todayStr())) continue;
+    if (h.missed >= 3 && h.done * 2 <= h.missed) {
+      const to = Object.entries(h.to).sort((a, b) => b[1] - a[1])[0];
+      return { e, h, to: to ? to[0] : swapPicks(w, w.exercises.indexOf(e))[0]?.name || null };
+    }
+  }
+  return null;
+}
+function habitCard(w) {
+  const n = habitNudge(w);
+  if (!n) return '';
+  const i = w.exercises.indexOf(n.e), bits = [n.h.skipped && `skipped it ${n.h.skipped}×`, n.h.swapped && `swapped it ${n.h.swapped}×`, n.h.removed && `removed it ${n.h.removed}×`].filter(Boolean);
+  return `<div class="card habit-card"><b>${esc(n.e.name)} keeps getting passed over</b>
+    <div class="muted small">In the last 6 weeks you ${listAnd(bits)}, and did it ${n.h.done}×. Want to change it for good?</div>
+    <div class="btn-row">${n.to ? `<button class="btn pri" data-a="habit-swap" data-wid="${w.id}" data-ex="${i}" data-to="${esc(n.to)}">Swap for ${esc(n.to)}</button>` : ''}
+      <button class="btn" data-a="ex-opts" data-wid="${w.id}" data-ex="${i}">Not for me…</button>
+      <button class="btn ghost" data-a="habit-keep" data-n="${esc(n.e.name)}">Keep it</button></div></div>`;
+}
+// Put a lift's replacement into the plan everywhere it appears, and into today if it's not started.
+function swapForGood(w, i, to) {
+  const e = w.exercises[i], from = e.name;
+  allPlans().forEach(p => (p.groups || []).forEach(g => g.forEach((x, k) => {
+    if (keyOf(x.name) === keyOf(from)) { g[k] = classify({ ...x, id: uid('e'), name: to, note: '' }); delete g[k].kind; delete g[k].body; classify(g[k]); }
+  })));
+  saveProgram();
+  if (!e.sets.some(x => x.done)) {
+    w.swaps = [...(w.swaps || []), { from, to, at: Date.now() }];
+    w.dropped = [...new Set([...(w.dropped || []), e.key])];
+    e.name = to; e.key = keyOf(to); delete e.makeUp; fillSets(e, w); persist(w);
+  }
+  return from;
+}
+// Swap choices for a lift in today's session: same muscles first, gentler ones first for a lift that
+// bothers you, favorites ahead of the rest, and nothing you've marked "not for me".
+function swapPicks(w, i) {
+  const ex = i != null ? w.exercises[i] : null;
+  let picks = knownExercises(new Set(w.exercises.map(e => e.key))).filter(p => !disliked(p.name, isHome(ex)));
+  if (ex) {
+    const mine = musclesOf(ex.name), gentle = careOf(ex.name) ? 1 : 0, H = liftHabits();
+    const overlap = n => sum(Object.entries(musclesOf(n)).map(([m, f]) => Math.min(f, mine[m] || 0)));
+    const score = n => overlap(n) + (gentle && LOW_STRAIN.test(n) ? 1 : 0) + (favored(n, H) ? 0.4 : 0);
+    picks = picks.map(p => ({ p, sc: score(p.name) })).sort((a, b) => b.sc - a.sc).map(x => x.p);
+    const near = picks.filter(p => overlap(p.name) > 0);
+    if (near.length >= 3) picks = near;
+  }
+  return picks;
+}
+function notForMeHTML(name, isBodyweight) {
+  const pr = prefOf(name);
+  const b = (v, n) => `<button class="${pr.no === v ? 'on' : ''}" data-a="pref-no" data-v="${pr.no === v ? '' : v}">${n}</button>`;
+  return `<label class="lbl">Not for you?</label>
+    <div class="chip-row">${Object.entries(PREF_WHY).map(([v, n]) => b(v, n)).join('')}</div>
+    <div class="sh-hint">${pr.no ? `Noted: ${esc(PREF_WHY[pr.no] || pr.no)}. ${pr.no === 'watching' && isBodyweight ? "It's in your At home list now." : "It won't come back in swaps or new blocks. Swap it above to change the plan."} Tap it again to undo.` : 'Pick a reason and the app (and your nightly trainer) steer around it from now on.'}</div>
+    <button class="linkbtn" data-a="pref-like">${pr.like ? '★ One of your favorites' : '☆ Mark as a favorite'}</button>`;
+}
+// Moves that start at bodyweight when there's no history yet.
+const NO_WEIGHT = /pull-?up|chin-?up|push-?up|plank|flutter|dead ?bug|hollow|leg raise|bodyweight/i;
+const BODYWEIGHT = /pull-?up|chin-?up|push-?up|\bdips?\b|plank|crunch|sit-?up|flutter|dead ?bug|hollow|leg raise|lunge|bodyweight|glute bridge|mace/i;
+
+// ---------- 6-week blocks ----------
+// The same week every week gets stale, and a fresh angle on small muscles helps them grow. So every
+// 6 weeks half the smaller lifts move to the next cousin in their family (the other half next time,
+// so each version gets 12 weeks to progress). Big lifts stay so their numbers keep climbing. A favorite never rotates out, a lift you've marked "not for me" never rotates in, and
+// a lift that bothers you stays as it is.
+const BLOCK_WEEKS = 6;
+function rotateBlock() {
+  const b = S.settings.block;
+  if (!b || !b.start) return null;
+  const due = addDays(b.start, BLOCK_WEEKS * 7);
+  if (todayStr() < due) return null;
+  const H = liftHabits(addDays(todayStr(), -BLOCK_WEEKS * 7)), changes = [];
+  const inPlan = () => new Set(allPlans().flatMap(p => (p.groups || []).flat().map(x => keyOf(x.name))));
+  let slot = 0;
+  DAYS.map(d => S.program.days[d]).filter(d => d && d.type === 'strength').forEach(day => (day.groups || []).forEach(g => g.forEach((x, k) => {
+    const fam = familyOf(x.name);
+    if (!fam) return;
+    if ((slot++ + b.n) % 2 || favored(x.name, H) || careOf(x.name)) return;
+    const used = inPlan(), at = fam.findIndex(n => keyOf(n) === keyOf(x.name));
+    for (let s = 1; s < fam.length; s++) {
+      const n = fam[(at + s) % fam.length];
+      if (used.has(keyOf(n)) || disliked(n, x.place === 'home')) continue;
+      const y = { ...x, id: uid('e'), name: n, note: /per (side|leg|arm)|max reps/i.test(x.note || '') ? x.note : '' };
+      delete y.kind; delete y.body; classify(y);
+      g[k] = y; changes.push(`${x.name} → ${n}`);
+      break;
+    }
+  })));
+  b.log = [...(b.log || []), { n: b.n + 1, start: weekStart(todayStr()), changes }].slice(-12);
+  b.n += 1; b.start = weekStart(todayStr());
+  saveSettings();
+  if (changes.length) { saveProgram(); S.notice = `New 6-week block: ${listAnd(changes)}. Big lifts stay the same so they keep climbing.`; }
+  return changes;
+}
+const nextBlockOn = () => (S.settings.block && S.settings.block.start ? addDays(S.settings.block.start, BLOCK_WEEKS * 7) : null);
+
 // The next set to do: the rest of this round in a superset (A1, B1, then A2…), then the next exercise.
 function nextSet(w, i, j) {
   const ex = w.exercises, grp = ex.map((e, k) => k).filter(k => ex[k].group === ex[i].group);
@@ -1634,17 +1906,20 @@ function planPreview(w) {
 function dayCoach(date, w) {
   if (date !== todayStr()) return null;
   const h = hourNow(), b = bodyEntry(date), strength = w.type === 'strength' && w.exercises.length;
-  const total = strength ? sum(w.exercises.map(e => e.sets.length)) : 0, done = strength ? sum(w.exercises.map(e => e.sets.filter(s => s.done).length)) : 0;
+  const gymEx = strength ? w.exercises.filter(e => !isHome(e)) : [];
+  const total = sum(gymEx.map(e => e.sets.length)), done = sum(gymEx.map(e => e.sets.filter(s => s.done).length));
+  const homeLeft = strength ? w.exercises.filter(e => isHome(e) && e.sets.some(s => !s.done)).map(e => e.name) : [];
+  const homeTail = homeLeft.length ? ` At home: ${listAnd(homeLeft)}.` : '';
   const acts = (w.activities || []).filter(actDone).length, pc = proteinCoach(date);
   const pTail = pc && pc.left > 0 && h >= 11 && h < 22 ? ` Protein next: ${pc.left} g to go.` : '';
   if (strength && done && done >= total) {
     const hi = wrapHighlight(w);
-    return { t: `That's a wrap ✓ ${done} sets in ${liftMinutes(w)} min.${hi ? ` ${hi}` : ''}${pTail}`, tone: 'good' };
+    return { t: `${homeLeft.length ? 'Gym done' : "That's a wrap"} ✓ ${done} sets in ${liftMinutes(w)} min.${hi ? ` ${hi}` : ''}${homeTail || pTail}`, tone: 'good' };
   }
   if (!strength && w.type !== 'rest' && acts) return { t: `Done for today ✓${pTail}`, tone: 'good' };
   if (strength && done) {
     const mins = Math.max(5, Math.round((total - done) * (S.settings.restSec + 50) / 60 / 5) * 5);
-    return { t: `${done} of ${total} sets. About ${mins} min to go.`, tone: '' };
+    return { t: `${done} of ${total} sets. About ${mins} min to go.${homeTail}`, tone: '' };
   }
   if (pc && pc.urgent) return { ...pc, src: 'protein' };
   if (w.type === 'rest' && !acts) return { t: dayPick(['Rest day. This is when the muscle actually gets built.', 'Rest day. Recover, eat your protein, sleep well.', 'Rest day. A walk is a nice bonus, nothing more needed.'], 'rest'), tone: '', why: WHY.rest_day };
@@ -2233,8 +2508,9 @@ function actKcal(a, date) {
 const actLoad = a => Math.max(0, actMet(a) - 1) * actMinutes(a) / 60;
 // Lifting time from when sets were logged, or about 2.5 minutes a set when that's missing.
 function liftMinutes(w) {
-  const n = sum((w.exercises || []).map(e => doneSets(e).length));
-  const ats = (w.exercises || []).flatMap(e => e.sets.filter(x => x.done && x.at).map(x => x.at)).sort((a, b) => a - b);
+  const gym = (w.exercises || []).filter(e => !isHome(e)), list = gym.some(e => doneSets(e).length) ? gym : (w.exercises || []);
+  const n = sum(list.map(e => doneSets(e).length));
+  const ats = list.flatMap(e => e.sets.filter(x => x.done && x.at).map(x => x.at)).sort((a, b) => a - b);
   if (ats.length >= 2) return Math.round(Math.max(n * 1.5, (ats[ats.length - 1] - ats[0]) / 60000 + 2));
   return Math.round(n * 2.5);
 }
@@ -2617,7 +2893,7 @@ function previewDay(k, date) {
   }
   const w = buildSession(k, date);
   return `<div class="card plan-card"><div class="lbl">The plan</div>
-    ${w.exercises.map(e => `<div class="row"><div>${esc(e.name)}<div class="muted small">${e.makeUp ? `Make-up from ${esc(e.makeUp)} · ` : ''}${esc(targetText(e.target))}</div></div>${e.sets[0] && +e.sets[0].w ? `<small>${fmtW(e.sets[0].w)} lb</small>` : ''}</div>`).join('')}
+    ${w.exercises.map(e => `<div class="row"><div>${esc(e.name)}<div class="muted small">${isHome(e) ? 'At home · ' : ''}${e.makeUp ? `Make-up from ${esc(e.makeUp)} · ` : ''}${esc(targetText(e.target))}</div></div>${e.sets[0] && +e.sets[0].w ? `<small>${fmtW(e.sets[0].w)} lb</small>` : ''}</div>`).join('')}
     ${w.exercises.some(e => e.sets[0] && +e.sets[0].w) ? '<div class="sh-hint">Weights are a guess for now. They update as you lift.</div>' : ''}</div>`;
 }
 
@@ -2627,7 +2903,8 @@ function sessionStrength(w) {
     const g = groups.find(x => x.id === e.group);
     if (g) g.items.push(i); else groups.push({ id: e.group, items: [i] });
   });
-  const cards = groups.map(g => {
+  const homeG = g => g.items.some(i => isHome(w.exercises[i]));
+  const card = g => {
     const multi = g.items.length > 1;
     const up = isLive(w) && g.items.some(i => (w.exercises[i].coach || {}).kind === 'up' && !isFolded(w, i));
     const inner = g.items.map((i, k) => exBlock(w, i, multi ? String.fromCharCode(65 + k) : '')).join('');
@@ -2635,7 +2912,10 @@ function sessionStrength(w) {
       ${multi ? '<div class="ss-tag">Superset <span>· alternate, rest after the round</span></div>' : ''}
       ${inner}
     </section>`;
-  }).join('');
+  };
+  const homeCards = groups.filter(homeG).map(card).join('');
+  const cards = groups.filter(g => !homeG(g)).map(card).join('')
+    + (homeCards ? `<div class="home-head"><b>At home</b><span>Before or after the gym, whenever suits you</span></div>${homeCards}` : '');
   const total = sum(w.exercises.map(e => e.sets.length));
   const logged = sum(w.exercises.map(e => e.sets.filter(s => s.done).length));
   const kcal = hasWork(w) ? workoutKcal(w) : null;
@@ -2647,6 +2927,7 @@ function sessionStrength(w) {
     ${w.date === todayStr() && !deloadState(w.date).active && !hasWork(w) ? deloadCard(w.date) : ''}
     ${!isLive(w) && w.exercises.some(e => e.sets.some(x => !x.done && x.w !== '' && x.r !== '')) ? `<button class="btn pri block" data-a="log-all" data-wid="${w.id}">${ic('check')} Log all sets as shown</button><div class="sh-hint" style="margin-bottom:10px">Or tick just the ones you did. Only ticked sets count.</div>` : ''}
     ${bodyCard(w)}
+    ${habitCard(w)}
     ${cards || '<div class="card empty"><b>No exercises yet</b>Add your first one below.</div>'}
     <div class="btn-row add-pair">
       <button class="btn" data-a="sx-add" data-wid="${w.id}">+ Exercise</button>
@@ -3731,8 +4012,8 @@ function openSetSheet(w, i, j) {
   S.sheet = { kind: 'set', wid: w.id, i, j, w: s.w === '' ? '' : String(s.w), r: s.r === '' ? '' : String(s.r), later: later.length, chain };
   renderSheet();
 }
-const EX_DEFAULT = { name: '', sets: 3, min: 8, max: 12, inc: UP, kind: 'compound', body: 'upper', unit: 'reps', note: '' };
-const exData = x => ({ name: x.name, sets: x.sets, min: x.min ?? '', max: x.max ?? '', inc: x.inc || UP, kind: x.kind, body: x.body, unit: x.unit || 'reps', note: x.note || '' });
+const EX_DEFAULT = { name: '', sets: 3, min: 8, max: 12, inc: UP, kind: 'compound', body: 'upper', unit: 'reps', note: '', place: 'gym' };
+const exData = x => ({ name: x.name, sets: x.sets, min: x.min ?? '', max: x.max ?? '', inc: x.inc || UP, kind: x.kind, body: x.body, unit: x.unit || 'reps', note: x.note || '', place: x.place === 'home' ? 'home' : 'gym' });
 // Program mode edits a day or saved workout; session mode (wid set) changes just today's session.
 function openExSheet(g, e) {
   const day = planOf(S.view.d);
@@ -3891,15 +4172,7 @@ function exSheetHTML() {
   const hi = num(x.max) ?? num(x.min);
   const title = sess ? (sh.i == null ? 'Add an exercise' : 'Change this exercise') : (sh.g == null ? 'New exercise' : 'Edit exercise');
   const ex = sess && sh.i != null ? w.exercises[sh.i] : null;
-  let picks = sess || sh.g == null ? knownExercises(new Set(sess ? w.exercises.map(e => e.key) : [])) : [];
-  if (ex) {
-    // Swaps that work the same muscles come first.
-    // A lift that bothers you lists gentler options (machines, curls, extensions) first.
-    const mine = musclesOf(ex.name), gentle = careOf(ex.name) ? 1 : 0;
-    const score = n => sum(Object.entries(musclesOf(n)).map(([m, f]) => Math.min(f, mine[m] || 0))) + (gentle && LOW_STRAIN.test(n) ? 1 : 0);
-    picks = picks.map(p => ({ p, sc: score(p.name) })).sort((a, b) => b.sc - a.sc).map(x => x.p);
-  }
-  if (ex) { const near = picks.filter(p => sum(Object.entries(musclesOf(p.name)).map(([m, f]) => Math.min(f, musclesOf(ex.name)[m] || 0))) > 0); if (near.length >= 3) picks = near; }
+  let picks = ex ? swapPicks(w, sh.i) : sess || sh.g == null ? knownExercises(new Set(sess ? w.exercises.map(e => e.key) : [])).filter(p => !disliked(p.name)) : [];
   picks = picks.slice(0, ex ? 8 : 16);
   const sample = ex ? (+(ex.sets.find(s => s.w !== '') || {}).w || 0) : 0;
   return `<div class="sh-grip"></div>
@@ -3908,9 +4181,12 @@ function exSheetHTML() {
       <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="${ex ? 'sx-swap' : 'sf-pick'}" data-n="${esc(p.name)}">${esc(p.name)}</button>`).join('')}</div>` : ''}
     ${ex ? formLink(ex.name) : ''}
     ${ex || sh.g != null ? careSeg(ex ? ex.name : x.name) : ''}
+    ${ex ? notForMeHTML(ex.name, BODYWEIGHT.test(ex.name)) : ''}
     ${ex ? '<button class="btn danger block" style="margin-top:12px" data-a="sx-rm">Remove from today</button><label class="lbl" style="margin-top:20px">Or change it</label>' : ''}
     <label class="lbl">Name</label>
     <input class="inp" data-sf="name" value="${esc(x.name)}" placeholder="e.g. Goblet squat">
+    <label class="lbl">Where</label>
+    <div class="seg">${segBtn('place', 'gym', 'At the gym')}${segBtn('place', 'home', 'At home')}</div>
     <label class="lbl">Sets</label>
     <div class="stepper three">
       <button class="st-btn" data-a="sf-step" data-f="sets" data-d="-1">−1</button>
@@ -4134,13 +4410,16 @@ function coachOp(prog, c) {
     if (note !== undefined) x.note = note;
   };
   const name = String(c.name || '').trim().slice(0, 50);
+  // Your 12-rep cap holds for the trainer too (bodyweight and carries excepted).
+  const capped = n => !NO_WEIGHT.test(n || '') && c.unit !== 'steps';
+  if (capped(c.op === 'swap' ? c.to : name) && ((min ?? 0) > REP_CAP || (max ?? 0) > REP_CAP)) return null;
   if (c.op === 'add') {
     if (!name || coachFind(day, name) || sets == null) return null;
-    const x = ex(name, sets, min ?? null, max ?? min ?? null, UP, { note: note || '', ...(c.body === 'lower' || c.body === 'upper' ? { body: c.body } : {}) });
+    const x = ex(name, sets, min ?? null, max ?? min ?? null, UP, { note: note || '', ...(c.body === 'lower' || c.body === 'upper' ? { body: c.body } : {}), ...(c.place === 'home' ? { place: 'home' } : {}) });
     const w = c.with && coachFind(day, c.with), a = c.after && coachFind(day, c.after);
     if (w) day.groups[w.gi].push(x);
     else day.groups.splice(a ? a.gi + 1 : day.groups.length, 0, [x]);
-    return `${D}: added ${name}, ${presTxt(x)}${w ? ` (paired with ${w.x.name})` : ''}`;
+    return `${D}: added ${name}${x.place === 'home' ? ' (at home)' : ''}, ${presTxt(x)}${w ? ` (paired with ${w.x.name})` : ''}`;
   }
   const f = coachFind(day, name);
   if (!f) return null;
@@ -4295,7 +4574,7 @@ const LV_TRY = {
   shoulders: 'Press overhead once a week and keep the lateral raises going.',
   lats: 'Do pulldowns or pull-ups twice a week, and add a rep before you add weight.',
   back: 'Row twice a week, with a short squeeze at the top of each rep.',
-  legs: 'Leg press or pendulum squat every week, 10–15 smooth reps, adding a little at a time.',
+  legs: 'Leg press or pendulum squat every week, 8–12 smooth reps, adding a little at a time.',
   glutes: 'Keep hip thrusts in twice a week, plus your RDLs.',
   arms: 'Do curls and pushdowns twice a week, close to failure.',
   chestSize: 'Keep chest work twice a week and eat enough to grow. Measure the same spot each time.',
@@ -4820,7 +5099,7 @@ function sheetItem(id) {
   const x = S.sheet.data;
   let min = num(x.min), max = num(x.max);
   if (min != null && max != null && min > max) [min, max] = [max, min];
-  return { id: id || uid('e'), name: String(x.name).trim(), sets: +x.sets, min, max, inc: +x.inc, kind: x.kind, body: x.body, stepSet: true, unit: x.unit, note: String(x.note).trim() };
+  return { id: id || uid('e'), name: String(x.name).trim(), sets: +x.sets, min, max, inc: +x.inc, kind: x.kind, body: x.body, stepSet: true, unit: x.unit, note: String(x.note).trim(), ...(x.place === 'home' ? { place: 'home' } : {}) };
 }
 function findPlanItem(plan, pid) {
   for (const g of plan.groups || []) { const k = g.findIndex(x => x.id === pid); if (k >= 0) return { g, k }; }
@@ -4861,7 +5140,9 @@ function saveSessExercise() {
     const changed = keyOf(item.name) !== e.key || ['sets', 'min', 'max', 'inc', 'kind', 'body', 'unit'].some(f => item[f] !== t[f]);
     const oldKey = e.key, oldName = e.name;
     if (keyOf(item.name) !== e.key) { w.dropped = [...new Set([...(w.dropped || []), e.key])]; delete e.makeUp; }
+    if (keyOf(item.name) !== e.key) w.swaps = [...(w.swaps || []), { from: oldName, to: item.name, at: Date.now() }];
     e.name = item.name; e.key = keyOf(item.name);
+    if (item.place === 'home') e.place = 'home'; else delete e.place;
     e.target = { sets: item.sets, min: item.min, max: item.max, inc: item.inc, kind: item.kind, body: item.body, stepSet: true, unit: item.unit, note: item.note };
     if (changed) fillSets(e, w);
     if (sh.toPlan && plan) {
@@ -4907,7 +5188,7 @@ const ACT = {
     const groups = [];
     w.exercises.forEach(e => {
       const t = targetOf(e);
-      const item = { id: uid('e'), name: e.name, sets: Math.max(t.sets, e.sets.length), min: t.min, max: t.max, inc: t.inc, kind: t.kind, body: t.body, stepSet: true, unit: t.unit, note: t.note };
+      const item = { id: uid('e'), name: e.name, sets: Math.max(t.sets, e.sets.length), min: t.min, max: t.max, inc: t.inc, kind: t.kind, body: t.body, stepSet: true, unit: t.unit, note: t.note, ...(isHome(e) ? { place: 'home' } : {}) };
       e.pid = item.id;
       const g = groups.find(x => x.id === e.group);
       if (g) g.items.push(item); else groups.push({ id: e.group, items: [item] });
@@ -4936,6 +5217,30 @@ const ACT = {
     renderSheet();
   },
   'sx-swap': d => { ACT['sf-pick'](d); saveSessExercise(); },
+  'habit-swap': d => {
+    const w = getW(d.wid), from = swapForGood(w, +d.ex, d.to);
+    render(); toast(`${from} → ${d.to}, here and in your plan.`);
+  },
+  'habit-keep': d => { setPref(d.n, { keepUntil: addDays(todayStr(), 42) }); render(); toast(`OK, ${d.n} stays. I won't ask again for 6 weeks.`); },
+  'pref-no': d => {
+    const sh = S.sheet, w = getW(sh.wid), e = w && w.exercises[sh.i];
+    if (!e) return;
+    setPref(e.name, { no: d.v || null, at: d.v ? Date.now() : null });
+    // Bodyweight work you'd rather not do in front of people goes to your At home list.
+    if (d.v === 'watching' && BODYWEIGHT.test(e.name)) {
+      allPlans().forEach(p => (p.groups || []).forEach(g => g.forEach(x => { if (keyOf(x.name) === e.key) x.place = 'home'; })));
+      saveProgram();
+      e.place = 'home'; persist(w);
+      toast(`${e.name} is in your At home list now.`);
+    } else if (d.v) { sh.toPlan = true; toast('Got it. Pick a swap above and it goes in your plan too.'); }
+    renderSheet(); render();
+  },
+  'pref-like': () => {
+    const sh = S.sheet, w = getW(sh.wid), e = w && w.exercises[sh.i];
+    if (!e) return;
+    setPref(e.name, { like: prefOf(e.name).like ? null : true });
+    renderSheet();
+  },
   'sf-toplan': () => { S.sheet.toPlan = !S.sheet.toPlan; renderSheet(); },
   'act-pick': d => { S.sheet = { kind: 'act', wid: d.wid }; renderSheet(); },
   'act-add': d => {
