@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.17.0';
+const APP_VERSION = '2.17.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4972,7 +4972,7 @@ function olCompute() {
     }
     const pace = con.c * r, w = olW(p);
     const when = target => (p >= target ? today : pace > 0 ? addDays(today, Math.round(((olW(target) - w) / pace) * 7)) : null);
-    return { ...a, p, lv: Math.floor(1 + p * (LV_MAX - 1)), r, pace, w, when, atH: olP(w + weeksLeft * pace) };
+    return { ...a, parts, p, lv: Math.floor(1 + p * (LV_MAX - 1)), r, pace, w, when, atH: olP(w + weeksLeft * pace) };
   }).filter(Boolean);
   if (!areas.length) return null;
   const mean = f => sum(areas.map(f)) / areas.length;
@@ -4993,6 +4993,15 @@ function olCompute() {
   const ready = Math.round(mean(a => Math.min(1, a.p / 0.7)) * 100);
   const lean = addDays(OL_HALLOWEEN, -84);
   return { areas, miles, con, ready, weeksLeft, old: { n: old.length, back }, lean, pace: mean(a => a.pace), today };
+}
+// Strength standards in the lift you actually do: now, at the Halloween look (70% of the way from your
+// level 1 to the fully built goal), and fully built. Weights for 12 reps, rounded to 5 lb (2.5 for dumbbells).
+function olLiftTargets(a) {
+  return a.parts.filter(x => LV_LIFTS[x.k] && x.best).map(x => {
+    const f = lvF(x), step = f > 1.5 ? 2.5 : 5, lb = v => Math.max(step, Math.round(v / f / LV_12 / step) * step);
+    const at = p => x.base + (x.goal - x.base) * p, name = lvLift(x), db = f > 1.5 ? ' (each hand)' : '';
+    return { name: name[0].toUpperCase() + name.slice(1), now: lb(x.v), h: lb(Math.max(x.v, at(0.7))), built: lb(Math.max(x.v, x.goal)), db };
+  });
 }
 // One snapshot a day, so the tab can say what moved (and the nightly trainer can see it).
 function olSnap(o) {
@@ -5023,6 +5032,7 @@ function viewOutlook() {
     return `<div class="ol-area"><div class="ol-area-top"><b>${esc(a.name)}</b><span class="ol-tag ${status[0]}">${status[1]}</span></div>
       <div class="prog ${a.p >= 0.7 ? 'hit' : ''}"><div style="width:${Math.round(Math.min(1, a.p / 0.7) * 100)}%"></div></div>
       <div class="sh-hint">Lv ${a.lv} now · Halloween look at Lv ${Math.ceil(1 + 0.7 * (LV_MAX - 1))} · ${a.p >= 0.7 ? 'reached' : `about ${esc(olMonth(d))}`}</div>
+      ${olLiftTargets(a).map(t => `<div class="ol-lift"><span>${esc(t.name)}${t.db}</span><b>${t.now} → ${t.h} lb × 12</b></div>`).join('')}
       <div class="ol-look">Goal: ${esc(a.look)}.${a.p < 0.7 && LV_TRY[a.of[0]] ? ` ${esc(LV_TRY[a.of[0]])}` : ''}</div></div>`;
   }).join('');
   const note = S.settings.outlookNote;
@@ -5037,6 +5047,7 @@ function viewOutlook() {
     <h2>Milestones</h2>
     <div class="card ol-miles">${first}${miles.join('')}</div>
     <h2>Your goals</h2>
+    <p class="sh-hint" style="margin:-4px 4px 10px">Lift targets show now → Halloween, for 12 reps. The Halloween numbers are about 70% of the way to the fully built strength standards for your size.</p>
     <div class="card">${areas}</div>
     <p class="sh-hint center" style="margin:6px 12px 18px">Dates assume you keep your current pace. They come from your levels and a growth curve for steady natural training, and they're checked every night by your trainer.</p>`;
 }

@@ -960,3 +960,6 @@ body.has-timer .streak-pill { visibility: hidden; }
 .ol-tag.good { color: var(--good); }
 .ol-tag.warn { color: var(--warn, #f0a14a); }
 .ol-look { color: var(--mut); font-size: 14px; line-height: 1.4; margin-top: 4px; }
+.ol-lift { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; margin-top: 4px; }
+.ol-lift span { color: var(--mut); }
+.ol-lift b { white-space: nowrap; font-variant-numeric: tabular-nums; }
