@@ -350,7 +350,7 @@ textarea.inp { min-height: 104px; padding: 12px 14px; resize: vertical; line-hei
 /* ---------- tabs ---------- */
 #tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(6, 1fr);
   height: calc(var(--tabh) + var(--safe-b));
   padding-bottom: var(--safe-b);
   background: rgba(14, 16, 19, .92);
@@ -934,3 +934,29 @@ body.has-timer .streak-pill { visibility: hidden; }
 .ex-notes { margin-top: 8px; }
 .ex-notes textarea { min-height: 72px; }
 .fold-sum svg { width: 15px; height: 15px; vertical-align: -2px; }
+
+.ol-hero .ol-big { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 2px; flex-wrap: wrap; }
+.ol-hero .ol-big span { font-size: 44px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
+.ol-hero .ol-big small { color: var(--mut); font-size: 14px; }
+.ol-move { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: var(--s2); white-space: nowrap; }
+.ol-move.up { color: var(--good); }
+.ol-move.down { color: var(--warn, #f0a14a); }
+.ol-miles { padding-top: 6px; padding-bottom: 6px; }
+.ol-mile { display: grid; grid-template-columns: 26px 1fr; gap: 12px; padding: 12px 0; position: relative; }
+.ol-mile + .ol-mile { border-top: 1px solid var(--line); }
+.ol-mile b { font-size: 16px; margin-right: 8px; }
+.ol-mile .ol-date { color: var(--acc); font-weight: 700; font-size: 14px; margin-right: 8px; }
+.ol-mile p { margin: 4px 0 0; color: var(--mut); font-size: 14px; line-height: 1.4; }
+.ol-mile.done b, .ol-mile.done .ol-date { color: var(--good); }
+.ol-dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--s3); display: grid; place-items: center; margin-top: 1px; }
+.ol-dot.done { background: var(--good); border-color: var(--good); color: #0b0d10; }
+.ol-dot.plan { border-style: dashed; border-color: var(--acc); }
+.ol-dot svg { width: 14px; height: 14px; }
+.ol-area { padding: 6px 0 12px; }
+.ol-area + .ol-area { border-top: 1px solid var(--line); padding-top: 14px; }
+.ol-area-top { display: flex; justify-content: space-between; align-items: center; }
+.ol-area .prog { margin: 8px 0 6px; }
+.ol-tag { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 99px; background: var(--s2); }
+.ol-tag.good { color: var(--good); }
+.ol-tag.warn { color: var(--warn, #f0a14a); }
+.ol-look { color: var(--mut); font-size: 14px; line-height: 1.4; margin-top: 4px; }

@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.16.0';
+const APP_VERSION = '2.17.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -2274,7 +2274,7 @@ function render() {
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === S.tab));
   let html;
   if (S.view) html = ({ workout: viewWorkout, exercise: viewExercise, progDay: viewProgDay, compare: viewCompare })[S.view.name]();
-  else html = ({ today: viewToday, history: viewHistory, body: viewBody, stats: viewStats, more: viewMore })[S.tab]();
+  else html = ({ today: viewToday, history: viewHistory, body: viewBody, stats: viewStats, outlook: viewOutlook, more: viewMore })[S.tab]();
   $('#view').innerHTML = html;
   lightMuscles();
   celebrateDay();
@@ -4495,6 +4495,7 @@ function reminderTimeChanged(field, value) {
 // key. At midnight a trainer reads it and may leave program changes, which the app applies to upcoming
 // workouts only. Logged workouts never change.
 function trainerSnapshot() {
+  try { olSnap(olCompute()); } catch (err) { /* outlook is a bonus; never block the sync */ }
   const { reminder, ...settings } = S.settings;
   return {
     app: 'liftlog', version: 1, appVersion: APP_VERSION, exportedAt: new Date().toISOString(),
@@ -4632,13 +4633,14 @@ function applyCoachPlan(plan) {
   const t = S.settings.trainer;
   t.lastId = String(plan.id).slice(0, 60);
   saveSettings();
-  const note = String(plan.note || '').trim().slice(0, 1500);
+  const note = String(plan.note || '').trim().slice(0, 1500), outlook = String(plan.outlook || '').trim().slice(0, 600);
+  if (outlook) { S.settings.outlookNote = { date: todayStr(), text: outlook }; saveSettings(); }
   const prog = JSON.parse(JSON.stringify(S.program));
   const lines = (Array.isArray(plan.changes) ? plan.changes.slice(0, 12) : []).map(c => {
     const t2 = coachOp(prog, c);
     return t2 && { t: t2, why: String((c && c.why) || '').trim().slice(0, 200) };
   }).filter(Boolean);
-  if (!note && !lines.length) return;
+  if (!note && !lines.length) { if (outlook && !S.sheet && !typing()) render(); return; }
   const entry = { id: t.lastId, date: todayStr(), note, lines, seen: false, undone: false };
   if (lines.length) {
     DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program } }).catch(() => {});
@@ -4910,6 +4912,134 @@ function lvWhy(s, was) {
   return `${Math.round(s.v)} workout days in the last 8 weeks${old ? `, down from ${Math.round(old)}` : ''}.`;
 }
 const lvTry = s => (s.k === 'weight' ? `For size, hold steady or gain slowly: eat a little more and hit your protein (${liveTarget(todayStr())} g).` : LV_TRY[s.k]);
+
+// ---------- outlook ----------
+// When you'll reach each goal if you keep going. Every body area's level (1 to 60) is read as progress
+// along one growth curve for steady training: p = 1 - e^(-weeks / 43.5). That puts "you see it" near
+// 3 months, "others notice" near 6, and Halloween-ready near a year of consistent work, which matches
+// typical natural gains for a returning lifter (fast at first thanks to muscle memory, then slower).
+// Your pace scales it: lifting days done out of 3 a week over the last 4 weeks, times how fast your
+// levels have actually grown compared with the curve. Breaks slow the pace (and fade levels), workouts
+// speed it up, so the dates move after every workout and every nightly check-in.
+const OL_TAU = 43.5, OL_HALLOWEEN = '2027-10-31';
+const olP = w => 1 - Math.exp(-Math.max(0, w) / OL_TAU);
+const olW = p => -OL_TAU * Math.log(1 - Math.min(0.995, Math.max(0, p)));
+const lvP = lv => (lv - 1) / (LV_MAX - 1);
+const OL_AREAS = [
+  { k: 'chest', name: 'Chest', of: ['chest', 'chestSize'], look: 'a full, square chest that fills out a shirt' },
+  { k: 'glutes', name: 'Glutes', of: ['glutes'], look: 'round, strong glutes from the side' },
+  { k: 'back', name: 'Back', of: ['lats', 'back'], look: 'a wide V from behind' },
+  { k: 'shoulders', name: 'Shoulders', of: ['shoulders'], look: 'capped, wide shoulders' },
+  { k: 'arms', name: 'Arms', of: ['arms', 'armSize'], look: 'tank-top arms (about 15" flexed)' },
+];
+const OL_MILES = [
+  { k: 'mirror', p: 0.25, title: 'You see it in the mirror', body: 'Fuller chest and shoulders, tighter shirts. You notice first.' },
+  { k: 'notice', p: 0.45, title: 'Others notice', body: '"Damn, that dude works out." Friends ask what you\'re doing.' },
+  { k: 'tank', p: 0.6, title: 'Tank-top arms', body: 'Arms and shoulders that pop in a tank top.', areas: ['arms', 'shoulders'] },
+  { k: 'halloween', p: 0.7, title: 'Halloween-ready', body: 'Lean, strong, and athletic with very little on.' },
+  { k: 'built', p: 0.92, title: 'Fully built', body: 'The polished, athletic build. From here it\'s keeping and refining.' },
+];
+// The last comeback: the first workout after 3+ weeks off (your clock starts there).
+function olRestart() {
+  const ds = [...new Set(S.workouts.filter(w => w.date <= todayStr() && (w.exercises || []).some(e => doneSets(e).length)).map(w => w.date))].sort();
+  for (let i = ds.length - 1; i > 0; i--) if (daysBetween(ds[i - 1], ds[i]) >= 21) return ds[i];
+  return ds[0] || todayStr();
+}
+// Lifting days in the last 4 weeks (or since you came back) out of 3 a week. Two weeks at a typical 85%
+// are blended in, so one great or missed week early on doesn't swing every date.
+function olConsistency() {
+  const today = todayStr(), from = [addDays(today, -27), olRestart()].sort()[1];
+  const days = new Set(S.workouts.filter(w => w.date >= from && w.date <= today && (w.exercises || []).some(e => doneSets(e).length)).map(w => w.date)).size;
+  const wks = Math.max(1, (daysBetween(from, today) + 1) / 7), per = plannedKeys().filter(k => S.program.days[k].type === 'strength').length || 3;
+  return { c: Math.max(0.15, Math.min(1, (days + 0.85 * per * 2) / (per * (wks + 2)))), days, wks, per };
+}
+function olCompute() {
+  const skills = lvCompute(), by = Object.fromEntries(skills.map(x => [x.k, x])), today = todayStr();
+  if (!skills.some(x => LV_LIFTS[x.k])) return null;
+  const hist = lvHistory(skills), con = olConsistency();
+  const weeksLeft = Math.max(0, daysBetween(today, OL_HALLOWEEN) / 7);
+  const areas = OL_AREAS.map(a => {
+    const parts = a.of.map(k => by[k]).filter(Boolean);
+    if (!parts.length) return null;
+    const p = sum(parts.map(x => lvP(x.lv))) / parts.length;
+    // Your real growth over the last 6 weeks against what the curve expects for the lifting you did.
+    const pts = a.of.map(k => (hist.by[k] || [])).filter(x => x.length);
+    let r = 1;
+    if (pts.length) {
+      const back = pts.map(x => x[Math.max(0, x.length - 7)][1]), past = sum(back.map(lvP)) / back.length;
+      const span = Math.min(6, daysBetween(olRestart(), today) / 7), want = olP(olW(past) + span * con.c) - past;
+      if (span >= 3 && want > 0.01) r = Math.max(0.6, Math.min(1.6, (p - past) / want));
+    }
+    const pace = con.c * r, w = olW(p);
+    const when = target => (p >= target ? today : pace > 0 ? addDays(today, Math.round(((olW(target) - w) / pace) * 7)) : null);
+    return { ...a, p, lv: Math.floor(1 + p * (LV_MAX - 1)), r, pace, w, when, atH: olP(w + weeksLeft * pace) };
+  }).filter(Boolean);
+  if (!areas.length) return null;
+  const mean = f => sum(areas.map(f)) / areas.length;
+  const miles = OL_MILES.map(m => {
+    const list = m.areas ? areas.filter(a => m.areas.includes(a.k)) : areas;
+    // A milestone lands when most of its areas get there (the middle date).
+    const ds = list.map(a => a.when(m.p)).filter(Boolean).sort();
+    return { ...m, date: ds.length ? ds[Math.floor((ds.length - 1) / 2)] : null, done: list.every(a => a.p >= m.p) };
+  });
+  // Back to your old bests: lifts at or above their best from the year before your comeback.
+  const ses = lvSessions(), start = olRestart();
+  const old = Object.keys(LV_LIFTS).map(k => {
+    const before = (ses[k] || []).filter(x => x.date < start && x.date >= addDays(start, -365));
+    return before.length && by[k] ? { k, best: Math.max(...before.map(x => x.v)), now: by[k].v } : null;
+  }).filter(Boolean);
+  const back = old.filter(x => x.now >= x.best * 0.99).length;
+  // How far along you are today toward the Halloween look (each area counts the same).
+  const ready = Math.round(mean(a => Math.min(1, a.p / 0.7)) * 100);
+  const lean = addDays(OL_HALLOWEEN, -84);
+  return { areas, miles, con, ready, weeksLeft, old: { n: old.length, back }, lean, pace: mean(a => a.pace), today };
+}
+// One snapshot a day, so the tab can say what moved (and the nightly trainer can see it).
+function olSnap(o) {
+  if (!o) return;
+  const st = S.settings.outlook = S.settings.outlook || { log: [] }, today = todayStr();
+  const snap = { d: today, h: o.ready, c: Math.round(o.con.c * 100) / 100, m: Object.fromEntries(o.miles.map(m => [m.k, m.date])), a: Object.fromEntries(o.areas.map(a => [a.k, a.lv])) };
+  const last = st.log[st.log.length - 1];
+  if (last && last.d === today) { if (JSON.stringify(last) === JSON.stringify(snap)) return; st.log[st.log.length - 1] = snap; } else st.log.push(snap);
+  st.log = st.log.slice(-120);
+  saveSettings();
+}
+const olMonth = d => (d ? fmtDate(d, { month: 'short', year: 'numeric' }) : 'Not yet');
+function viewOutlook() {
+  const o = olCompute();
+  if (!o) return `<header class="top"><h1>Outlook</h1></header><div class="card empty"><b>Log a few workouts first</b>Your timeline shows up once there are lifts to build from.</div>`;
+  olSnap(o);
+  const log = (S.settings.outlook || {}).log || [], wkAgo = [...log].reverse().find(x => x.d <= addDays(o.today, -7)) || log[0];
+  const dh = wkAgo && wkAgo.d !== o.today ? o.ready - wkAgo.h : 0;
+  const moved = k => { const a = wkAgo && wkAgo.d !== o.today && wkAgo.m[k], b = o.miles.find(m => m.k === k).date; if (!a || !b) return ''; const n = daysBetween(b, a); return Math.abs(n) < 4 ? '' : `<span class="ol-move ${n > 0 ? 'up' : 'down'}">${n > 0 ? `${n} days sooner` : `${-n} days later`}</span>`; };
+  const H = o.miles.find(m => m.k === 'halloween'), onTrack = H.date && H.date <= OL_HALLOWEEN;
+  const perWk = round1(o.con.c * o.con.per);
+  const lean = o.today < o.lean ? `<div class="ol-mile"><i class="ol-dot plan"></i><div><b>Lean-out starts</b><span class="ol-date">${esc(fmtDate(o.lean, { month: 'short', day: 'numeric', year: 'numeric' }))}</span><p>12 weeks of a small calorie trim (about 0.5 to 0.75% of bodyweight a week), protein high, lifting heavy, so the muscle shows. Until then: grow.</p></div></div>` : '';
+  const miles = o.miles.map(m => `<div class="ol-mile ${m.done ? 'done' : ''}"><i class="ol-dot ${m.done ? 'done' : ''}">${m.done ? ic('check') : ''}</i><div><b>${esc(m.title)}</b><span class="ol-date">${m.done ? 'Done' : esc(olMonth(m.date))}</span>${moved(m.k)}<p>${esc(m.body)}</p></div></div>`);
+  miles.splice(3, 0, lean);
+  const first = o.old.n ? `<div class="ol-mile ${o.old.back >= o.old.n ? 'done' : ''}"><i class="ol-dot ${o.old.back >= o.old.n ? 'done' : ''}">${o.old.back >= o.old.n ? ic('check') : ''}</i><div><b>Back to your old bests</b><span class="ol-date">${o.old.back} of ${o.old.n} lifts</span><p>Muscle memory brings these back fast, usually 4 to 8 weeks of steady lifting.</p></div></div>` : '';
+  const areas = o.areas.map(a => {
+    const d = a.when(0.7), status = a.p >= 0.7 ? ['good', 'There'] : d && d <= OL_HALLOWEEN ? (a.r > 1.15 ? ['good', 'Ahead'] : ['good', 'On pace']) : ['warn', 'Behind'];
+    return `<div class="ol-area"><div class="ol-area-top"><b>${esc(a.name)}</b><span class="ol-tag ${status[0]}">${status[1]}</span></div>
+      <div class="prog ${a.p >= 0.7 ? 'hit' : ''}"><div style="width:${Math.round(Math.min(1, a.p / 0.7) * 100)}%"></div></div>
+      <div class="sh-hint">Lv ${a.lv} now · Halloween look at Lv ${Math.ceil(1 + 0.7 * (LV_MAX - 1))} · ${a.p >= 0.7 ? 'reached' : `about ${esc(olMonth(d))}`}</div>
+      <div class="ol-look">Goal: ${esc(a.look)}.${a.p < 0.7 && LV_TRY[a.of[0]] ? ` ${esc(LV_TRY[a.of[0]])}` : ''}</div></div>`;
+  }).join('');
+  const note = S.settings.outlookNote;
+  return `<header class="top"><h1>Outlook</h1></header>
+    <div class="card ol-hero">
+      <div class="lbl">Halloween 2027 · ${Math.round(o.weeksLeft)} weeks</div>
+      <div class="ol-big"><span>${o.ready}%</span><small>of the way to your Halloween look${dh ? ` <b class="ol-move ${dh > 0 ? 'up' : 'down'}">${dh > 0 ? '+' : ''}${dh}% this week</b>` : ''}</small></div>
+      <div class="prog ${o.ready >= 100 ? 'hit' : ''}"><div style="width:${o.ready}%"></div></div>
+      <p class="sh-hint">${onTrack ? `On track: at ${perWk} lifting days a week you get there around <b>${esc(fmtDate(H.date, { month: 'short', day: 'numeric', year: 'numeric' }))}</b>, ahead of Oct 31.` : `At ${perWk} lifting days a week it lands around <b>${esc(olMonth(H.date))}</b>, after Oct 31. All ${o.con.per} lifting days a week pulls it in.`} Every workout moves this, and so do breaks.</p>
+    </div>
+    ${note && note.text ? `<div class="card tr-card"><div class="lbl">From your trainer · ${esc(fmtDate(note.date, { month: 'short', day: 'numeric' }))}</div><p>${esc(note.text)}</p></div>` : ''}
+    <h2>Milestones</h2>
+    <div class="card ol-miles">${first}${miles.join('')}</div>
+    <h2>Your goals</h2>
+    <div class="card">${areas}</div>
+    <p class="sh-hint center" style="margin:6px 12px 18px">Dates assume you keep your current pace. They come from your levels and a growth curve for steady natural training, and they're checked every night by your trainer.</p>`;
+}
 
 // Runs after every render: level-ups right away, level drops once a day.
 function checkLevels() {
