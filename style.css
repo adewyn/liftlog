@@ -282,6 +282,10 @@ textarea.inp { min-height: 104px; padding: 12px 14px; resize: vertical; line-hei
 .datebar .icon-btn:disabled { opacity: .3; }
 .big-num { font-size: 40px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .big-num small { font-size: 18px; color: var(--mut); font-weight: 600; letter-spacing: 0; }
+.prot-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.prot-left { text-align: right; padding-bottom: 6px; line-height: 1.15; }
+.prot-left b { display: block; font-size: 24px; font-weight: 750; color: var(--acc); font-variant-numeric: tabular-nums; }
+.prot-left span { font-size: 13px; color: var(--mut); font-weight: 600; }
 .prog { height: 12px; background: var(--s2); border-radius: 99px; overflow: hidden; margin: 10px 0 14px; }
 .prog > div { height: 100%; background: var(--acc); border-radius: 99px; transition: width .3s; }
 .prog.hit > div { background: var(--good); }

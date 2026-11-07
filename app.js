@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.12.0';
+const APP_VERSION = '2.12.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -3098,7 +3098,8 @@ function viewBody() {
 
     <div class="card">
       <label class="lbl">Protein</label>
-      <div class="big-num">${b.protein}<small> / ${target} g</small></div>
+      <div class="prot-row"><div class="big-num">${b.protein}<small> / ${target} g</small></div>
+        <div class="prot-left ${left > 0 ? '' : 'hit'}">${left > 0 ? `<b>${left} g</b><span>${date === today ? 'left to eat' : 'short'}</span>` : `<b>Hit</b><span>${left < 0 ? `${-left} g over` : 'right on'}</span>`}</div></div>
       <div class="prog ${b.protein >= target ? 'hit' : ''}"><div style="width:${pct}%"></div></div>
       ${date === today ? proteinSayHTML(proteinCoach(date)) : `<div class="muted small" style="margin-top:-6px">${left > 0 ? `${left} g short that day` : 'Target hit.'}</div>`}
       <div class="sh-hint">Target: ${why}</div>
