@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.15.1';
+const APP_VERSION = '2.16.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -667,6 +667,21 @@ function targetText(t) {
   return s;
 }
 
+// Real rest between sets, from when each set was logged. Gaps under 15 sec are catch-up taps, and gaps
+// over 15 min mean you stepped away, so neither counts as rest.
+function restInfo(w, e) {
+  const ats = e.sets.filter(s => s.done && s.at).map(s => +s.at).sort((a, b) => a - b), g = [];
+  for (let k = 1; k < ats.length; k++) { const d = (ats[k] - ats[k - 1]) / 1000; if (d >= 15 && d <= 900) g.push(d); }
+  if (!g.length) return null;
+  g.sort((a, b) => a - b);
+  const med = g.length % 2 ? g[(g.length - 1) / 2] : (g[g.length / 2 - 1] + g[g.length / 2]) / 2;
+  return { med: Math.round(med), n: g.length, plan: restFor(w, e) };
+}
+// Rested well under the timer (30% less, and at least 25 sec less).
+const rushed = p => !!(p && p.rest && p.rest.med <= p.rest.plan * 0.7 && p.rest.med <= p.rest.plan - 25);
+// ...and kept your reps up anyway (the last set within a rep of the first): you had more in you.
+const quickAndStrong = p => rushed(p) && p.sets.length >= 2 && +p.sets[p.sets.length - 1].r >= +p.sets[0].r - 1;
+const restTxt = p => `about ${fmtClock(p.rest.med)} rest (timer ${fmtClock(p.rest.plan)})`;
 // Earlier sessions of this exercise (newest first), with only the logged sets.
 function recentPerf(key, w, n) {
   const out = [];
@@ -675,7 +690,7 @@ function recentPerf(key, w, n) {
     if (o.id === w.id) continue;
     if (o.date > w.date || (o.date === w.date && o.createdAt > w.createdAt)) continue;
     const e = (o.exercises || []).find(x => x.key === key && doneSets(x).length && !!x.pin === pinOn(key));
-    if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) || offDay(o), note: liftNote(o, e.name), t: e.target ? { min: e.target.min, max: e.target.max } : null, grace: (e.coach && e.coach.grace) || 0 });
+    if (e) out.push({ date: o.date, sets: doneSets(e), easy: !!o.deload || lowDay(o.date) || offDay(o), note: liftNote(o, e.name), t: e.target ? { min: e.target.min, max: e.target.max } : null, grace: (e.coach && e.coach.grace) || 0, rest: o.imported ? null : restInfo(o, e) });
   }
   return out;
 }
@@ -718,7 +733,8 @@ function coachPlan(t, recent, opts = {}) {
   const holdWhy = opts.energy === 'low' ? (opts.sick ? "you're sick" : "energy's low") : opts.tired || (opts.noted === 'lift-pain' ? 'it hurt last time' : opts.noted === 'lift-hard' ? 'it felt hard last time' : '');
   // Sessions logged on a low-energy day don't count as misses. Right after a big jump (p.grace), a few
   // reps under the range is expected (about 3, and a rep less on later sets), so that isn't a miss either.
-  const short = p => !p.easy && (p.sets.length < t.sets || p.sets.some(x => +x.r < lo - (p.grace ? 4 : 0)));
+  // A session where you rushed the rests doesn't count as a miss either: the weight wasn't the problem.
+  const short = p => !p.easy && !rushed(p) && (p.sets.length < t.sets || p.sets.some(x => +x.r < lo - (p.grace ? 4 : 0)));
   const total = p => sum(p.sets.map(x => +x.r || 0));
   const bestE = p => Math.max(0, ...p.sets.filter(x => +x.w).map(x => e1rm(+x.w, Math.min(+x.r || 0, 20))));
 
@@ -745,13 +761,18 @@ function coachPlan(t, recent, opts = {}) {
     if (jumpFor(t, top) / top > 0.1 && !reps.every(r => r >= hi + 2)) {
       return plan('reps', prev, fill(hi + 2), `${round2(top + jumpFor(t, top))} lb is a big step, so earn it: ${hi + 2} on every set first.`);
     }
-    const easy = opts.noted === 'lift-easy';
+    // Short rests with reps held (or "felt easy") earn a double step, as long as that stays within about 10%.
+    const quick = !holdWhy && quickAndStrong(last);
+    const easy = opts.noted === 'lift-easy' || (quick && (2 * jumpFor(t, top)) / top <= 0.1);
     const w = round2(top + jumpFor(t, top) * (easy ? 2 : 1));
     // A jump over 10% (25 → 30 lb dumbbells) won't allow the bottom of the range yet, so aim for what the
     // estimated max says you can do, and give it a few sessions to climb back into the range.
     const aim = (w - top) / top > 0.1 ? Math.max(1, Math.min(lo, Math.round((e1rm(top, Math.min(Math.min(...reps), 20)) / w - 1) * 30))) : lo;
     if (aim < lo) return { ...plan('up', fill(w), fill(aim), `${hi} on every set. ${w} lb is a big step, so aim for ${aim} and climb from there. Under ${lo} is fine for a few sessions.`), grace: 3 };
-    return plan('up', fill(w), fill(lo), easy ? `${hi} on every set and you said it felt easy. Bigger jump: ${w} lb, aim for ${lo}+.` : `${hi}on every set last time. Up to ${w} lb, aim for ${lo}+.`);
+    return plan('up', fill(w), fill(lo), opts.noted === 'lift-easy' ? `${hi} on every set and you said it felt easy. Bigger jump: ${w} lb, aim for ${lo}+.` : quick ? `${hi} on every set with only ${restTxt(last)}. You had more in you, so ${easy ? 'a bigger jump: ' : ''}${w} lb, aim for ${lo}+${easy ? '' : ', and push the top of the range'}.` : `${hi} on every set last time. Up to ${w} lb, aim for ${lo}+.`);
+  }
+  if (rushed(last) && !last.easy && (last.sets.length < t.sets || last.sets.some(x => +x.r < lo))) {
+    return plan('hold', prev, reps.map(r => Math.max(r, lo)), `Short of ${lo}, but with only ${restTxt(last)}. Same ${wTxt(top)}, and take the full rest this time.`);
   }
   if (short(last)) {
     const p2 = recent[1];
@@ -779,6 +800,9 @@ function coachPlan(t, recent, opts = {}) {
   const p2 = recent[1];
   if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi) && p2 && Math.max(...p2.sets.map(s => +s.w || 0)) === top && total(last) < total(p2)) {
     return plan('hold', prev, reps, `Last set was all-out and reps dipped. Match ${wTxt(top)} before adding reps.`);
+  }
+  if (quickAndStrong(last)) {
+    return plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 2))), `Only ${restTxt(last)} and your reps held, so two more reps a set (top is ${hi}).`);
   }
   return plan('reps', prev,
     Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 1))),
@@ -1819,6 +1843,7 @@ function setReaction(w, i, j, tip) {
     // Caught-up logging (ticks seconds apart) doesn't count; a real short rest that cost reps does.
     const gap = (s.at - (prev.at || 0)) / 1000, solo = w.exercises.filter(x => x.group === e.group).length === 1;
     if (solo && t.kind !== 'iso' && gap >= 20 && gap < 60 && r < (+s.pr || lo)) add('fast', 55, 'Quick turnaround. A full rest gets you more reps.', 'care', { act: true, once: 'fast', why: WHY.rest });
+    else if (gap >= 15 && gap <= restFor(w, e) * 0.7 && gap <= restFor(w, e) - 25 && r >= (+s.pr || lo) && r >= +prev.r - 1) add('quick', 50, `Back in ${fmtClock(Math.round(gap))}, before the timer, and still hit ${r}. Noted: next time asks for more.`, 'good', { once: `qk:${e.key}` });
   }
   const pw = s.pw === '' || s.pw == null ? null : +s.pw;
   if (easyDay && pw != null && (wt > pw || (s.pr && r >= +s.pr + 3))) add('easy', 60, 'Easy day, remember. Leave 2 or 3 in the tank.', 'care', { act: true, once: 'easy' });
@@ -3084,7 +3109,7 @@ function exBlock(w, i, letter) {
   const stack = isPin(e);
   const unit = e.target.unit === 'steps' ? 'steps' : 'reps';
   const lastTxt = last
-    ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>`
+    ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>${last.rest ? ` · rested ${fmtClock(last.rest.med)}` : ''}`
     : doneSets(e).length ? '' : 'First time logging this. Enter a weight to start.';
   const keepW = (k, s) => (c.prev ? c.prev[Math.min(k, c.prev.length - 1)] : (+s.w === c.w ? c.from : +s.w));
   const canKeep = c && (c.kind === 'up' || c.kind === 'down') && e.sets.some((s, k) => !s.done && +s.w !== keepW(k, s));
@@ -4475,7 +4500,7 @@ function trainerSnapshot() {
     app: 'liftlog', version: 1, appVersion: APP_VERSION, exportedAt: new Date().toISOString(),
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     program: S.program, settings, workouts: S.workouts,
-    body: Object.values(S.body).map(({ items, ...b }) => b),
+    body: Object.values(S.body),
     proteinToday: liveTarget(todayStr()),
     photos: S.photos.map(p => ({ id: p.id, date: p.date })),
     coachLog: S.coachLog.slice(0, 10).map(c => ({ id: c.id, date: c.date, undone: !!c.undone })),
