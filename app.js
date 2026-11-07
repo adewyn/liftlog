@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.13.0';
+const APP_VERSION = '2.13.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -581,7 +581,7 @@ function adjustRest(w, e, j) {
   // a big jump, a few reps under the range is expected.
   const easy = lowDay(w.date) || !!w.deload, cut = easy ? 2 : (e.coach && e.coach.grace ? 4 : 0);
   const lo = Math.max(1, (t.min ?? t.max) - cut), hi = (t.max ?? t.min) - (easy ? 2 : 0), step = t.inc || UP, w0 = +s.w;
-  const rest = e.sets.filter((x, k) => k > j && !x.done && +x.w === w0);
+  const rest = e.sets.filter((x, k) => k > j && !x.done && !x.own && +x.w === w0);
   if (!rest.length || !w0) return null;
   // Lifts that bother you (and shoulder care) never go up mid-workout.
   const careful = REHAB_WORDS.test(e.name) || !!careOf(e.name);
@@ -680,14 +680,16 @@ function fillSets(e, w) {
   const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', noteCue, helps ? `Sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here. Go lighter, stop if it pulls.` : ''].filter(Boolean).join(' ');
   if (cue) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${cue}`.trim() } : { kind: 'hold', note: cue, from: 0, w: 0, prev: null };
   const n = deload ? Math.ceil(sets / 2) : low ? Math.min(2, sets) : sets;
-  const done = e.sets.filter(s => s.done);
-  e.sets = done.concat(Array.from({ length: Math.max(0, n - done.length) }, (_, m) => {
-    const k = done.length + m;
+  // Sets you've logged or typed in yourself stay exactly as they are; only the rest get re-planned.
+  const keep = s => s && (s.done || s.own);
+  const len = Math.max(n, e.sets.reduce((a, s, k) => (keep(s) ? k + 1 : a), 0));
+  e.sets = Array.from({ length: len }, (_, k) => {
+    if (keep(e.sets[k])) return e.sets[k];
     const r = plan ? plan.reps[Math.min(k, plan.reps.length - 1)] : null;
     const pr = plan && (low || deload) && r > 3 ? r - 2 : r;
     return plan ? { w: plan.ws[k], r: pr, done: false, pw: plan.ws[k], pr }
       : { w: '', r: t.min ?? t.max ?? '', done: false };
-  }));
+  });
 }
 
 // A lift done at different rep ranges on different days (heavy Monday, light Friday) builds on the
@@ -791,6 +793,7 @@ function todaySession() {
     w.planKey = key;
     if (found) persist(w);
   }
+  if (found && sortByLogged(w)) persist(w);
   return w;
 }
 const sleepFor = date => (S.body[date] || {}).sleep ?? null;
@@ -1227,45 +1230,42 @@ function deloadCard(date) {
 
 function tick(w, i, j) {
   const s = w.exercises[i].sets[j];
-  if (s.done) { s.done = false; persist(w); render(); return; }
+  if (s.done) { s.done = false; s.own = true; persist(w); render(); return; }
   if (s.w === '' || s.r === '') { openSetSheet(w, i, j); return; }
   logInOrder(w, i, j);
 }
-// Log a set. A lift done ahead of ones not started yet moves up to sit after what you've done, so the
-// list reads in the order you did it. The workout keeps a note of the move for the nightly trainer.
+// Log a set, keeping the next set (or this one) still on screen even when the list reorders.
 function logInOrder(w, i, j) {
-  const ni = isLive(w) ? moveToLogged(w, i) : i;
-  if (ni !== i) {
-    const a = document.querySelector(setSel(w, i, j)), t = a && a.getBoundingClientRect().top;
-    logSet(w, ni, j);
-    const b = document.querySelector(setSel(w, ni, j));
-    if (a && b) window.scrollBy(0, b.getBoundingClientRect().top - t);
-    const next = nextSet(w, ni, j);
-    if (next) showAboveTimer(setSel(w, ...next));
-    return;
-  }
-  const next = nextSet(w, i, j);
-  keepInPlace(next ? setSel(w, ...next) : setSel(w, i, j), () => logSet(w, i, j));
-  if (next) showAboveTimer(setSel(w, ...next));
+  const e = w.exercises[i], nx = nextSet(w, i, j);
+  const [ae, aj] = nx ? [w.exercises[nx[0]], nx[1]] : [e, j];
+  const sel = () => setSel(w, w.exercises.indexOf(ae), aj);
+  const a = document.querySelector(sel()), t = a && a.getBoundingClientRect().top;
+  logSet(w, i, j);
+  const b = document.querySelector(sel());
+  if (a && b) window.scrollBy(0, b.getBoundingClientRect().top - t);
+  if (nx) showAboveTimer(sel());
 }
-// Returns the lift's new index. Moves its whole superset, and only on the first set logged for it.
-function moveToLogged(w, i) {
-  const ex = w.exercises, g = ex[i].group;
-  const started = e => e.sets.some(x => x.done);
-  if (ex.some(e => e.group === g && started(e))) return i;
-  const first = ex.findIndex(e => e.group === g);
-  let lastDone = -1;
-  ex.forEach((e, k) => { if (k < first && started(e)) lastDone = k; });
-  const skipped = ex.slice(lastDone + 1, first).filter(e => !started(e));
-  if (!skipped.length) return i;
-  const mine = ex.filter(e => e.group === g), key = ex[i].key;
-  const rest = ex.filter(e => e.group !== g);
-  rest.splice(lastDone + 1, 0, ...mine);
-  w.exercises = rest;
+// Today's list reads in the order you lifted: lifts you've started come first, in the order you
+// started them (supersets stay together), then the rest as planned. A lift done ahead of ones planned
+// before it gets a note on the workout, which the nightly trainer reads. Returns true if anything moved.
+function sortByLogged(w) {
+  if (w.type !== 'strength' || !Array.isArray(w.exercises)) return false;
+  const groups = [];
+  w.exercises.forEach(e => { let g = groups.find(x => x.id === e.group); if (!g) groups.push(g = { id: e.group, items: [] }); g.items.push(e); });
+  const started = g => g.items.some(e => e.sets.some(x => x.done));
+  const firstAt = g => Math.min(...g.items.flatMap(e => e.sets.filter(x => x.done).map(x => +x.at || Infinity)));
+  const doneG = groups.filter(started);
+  const next = [...doneG].sort((a, b) => (firstAt(a) === firstAt(b) ? 0 : firstAt(a) - firstAt(b))).concat(groups.filter(g => !started(g)));
+  if (next.every((g, k) => g === groups[k])) return false;
+  const name = g => g.items.map(e => e.name).join(' + ');
   w.reorder = w.reorder || [];
-  const skippedGroups = [...new Set(skipped.map(e => e.group))].map(id => skipped.filter(e => e.group === id).map(e => e.name).join(' + '));
-  w.reorder.push({ lift: mine.map(e => e.name).join(' + '), ahead: skippedGroups, at: Date.now() });
-  return w.exercises.findIndex(e => e.key === key && e.group === g);
+  next.forEach((g, k) => {
+    if (!started(g)) return;
+    const passed = groups.slice(0, groups.indexOf(g)).filter(h => next.indexOf(h) > k);
+    if (passed.length && !w.reorder.some(r => r.lift === name(g))) w.reorder.push({ lift: name(g), ahead: passed.map(name), at: Number.isFinite(firstAt(g)) ? firstAt(g) : Date.now() });
+  });
+  w.exercises = next.flatMap(g => g.items);
+  return true;
 }
 // The next set to do: the rest of this round in a superset (A1, B1, then A2…), then the next exercise.
 function nextSet(w, i, j) {
@@ -1312,6 +1312,7 @@ function logSet(w, i, j) {
   if (today) {
     say = setReaction(w, i, j, adjustRest(w, e, j));
     if (say) S.say[`${w.id}:${e.key}`] = { ...say, at: Date.now() };
+    sortByLogged(w);
   }
   persist(w);
   haptic();
@@ -3744,6 +3745,22 @@ function openSessExSheet(w, i) {
   S.sheet = { kind: 'ex', wid: w.id, i, data: exData(e ? { ...targetOf(e), name: e.name } : EX_DEFAULT), toPlan: false };
   renderSheet();
 }
+// A set you typed into is saved when the sheet is swiped or tapped away, or the app closes. Only
+// Cancel throws it away.
+function keepTyped() {
+  const sh = S.sheet;
+  if (!sh || sh.kind !== 'set') return;
+  const w = getW(sh.wid), e = w && w.exercises[sh.i], s = e && e.sets[sh.j];
+  const nw = num(sh.w), nr = num(sh.r);
+  if (!s) return;
+  const newW = nw != null && (s.w === '' || +s.w !== nw), newR = nr != null && (s.r === '' || +s.r !== nr);
+  if (!newW && !newR) return;
+  if (newW) s.w = nw;
+  if (newR) s.r = nr;
+  if (!s.done) s.own = true;
+  persist(w);
+}
+const dismissSheet = () => { keepTyped(); closeSheet(); render(); };
 function closeSheet() {
   S.sheet = null;
   renderSheet();
@@ -3782,7 +3799,7 @@ function renderSheet() {
     panel.style.transition = 'transform .2s ease-out';
     if (dy > Math.min(140, panel.offsetHeight * 0.25) || fast) {
       panel.style.transform = 'translateY(100%)';
-      setTimeout(() => { panel.style.transition = ''; panel.style.transform = ''; closeSheet(); }, 190);
+      setTimeout(() => { panel.style.transition = ''; panel.style.transform = ''; dismissSheet(); }, 190);
     } else {
       panel.style.transform = '';
       setTimeout(() => { panel.style.transition = ''; }, 210);
@@ -5099,6 +5116,7 @@ const ACT = {
   'test-timer': () => startTimer(5),
 
   'sheet-close': () => closeSheet(),
+  'sheet-dismiss': () => dismissSheet(),
   'ss-step': d => {
     const v = (num(S.sheet[d.f]) || 0) + +d.d;
     S.sheet[d.f] = String(Math.max(0, round2(v)));
@@ -5112,6 +5130,7 @@ const ACT = {
     if (nr == null) { toast('Enter how many you did'); return; }
     const old = s.w;
     s.w = nw; s.r = nr;
+    if (!s.done) s.own = true;
     if (S.sheet.chain && +old !== nw) e.sets.forEach((x, k) => { if (k > S.sheet.j && !x.done) x.w = nw; });
     const wasDone = s.done, i = S.sheet.i, j = S.sheet.j;
     closeSheet();
@@ -5419,6 +5438,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     // Save what's half-typed (change fires on blur) and anything waiting on a timer.
     if (typing()) document.activeElement.blur();
+    keepTyped();
     flushSaves();
     if (progTimer) { clearTimeout(progTimer); progTimer = null; saveProgram(); }
     trainerSync();
