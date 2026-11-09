@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.18.0';
+const APP_VERSION = '2.18.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4546,6 +4546,8 @@ async function trainerPull() {
   try {
     const plan = await pushApi('coach', { k: t.k });
     if (plan && plan.id && plan.id !== t.lastId) applyCoachPlan(plan);
+    // A look update that an older version skipped still lands once.
+    else if (plan && plan.look && typeof plan.look === 'object' && (S.settings.look || {}).id !== String(plan.id)) { applyLook(plan.look, plan.id); if (!S.sheet && !typing()) render(); }
   } catch (err) { /* offline */ }
 }
 
@@ -4637,7 +4639,7 @@ function applyCoachPlan(plan) {
   const note = String(plan.note || '').trim().slice(0, 1500), outlook = String(plan.outlook || '').trim().slice(0, 600);
   if (outlook) { S.settings.outlookNote = { date: todayStr(), text: outlook }; saveSettings(); }
   const look = plan.look && typeof plan.look === 'object' ? plan.look : null;
-  if (look) applyLook(look);
+  if (look) applyLook(look, plan.id);
   const prog = JSON.parse(JSON.stringify(S.program));
   const lines = (Array.isArray(plan.changes) ? plan.changes.slice(0, 12) : []).map(c => {
     const t2 = coachOp(prog, c);
@@ -5114,10 +5116,10 @@ function inspoSheetHTML() {
     </div>`;
 }
 // The trainer's look update: targets, a short read, and a fresh set of pictures (yours stay).
-function applyLook(l) {
+function applyLook(l, id) {
   const n = (v, lo, hi) => (v != null && Number.isFinite(+v) && +v >= lo && +v <= hi ? +v : null);
   const s = (v, max) => String(v || '').trim().slice(0, max);
-  const look = { date: todayStr(), text: s(l.text, 900), targets: {} };
+  const look = { id: String(id || '').slice(0, 60), date: todayStr(), text: s(l.text, 900), targets: {} };
   const lim = { weight: [90, 400], bf: [3, 40], chest: [25, 70], arm: [8, 30], waist: [20, 60], thigh: [12, 45] };
   Object.entries(lim).forEach(([k, [lo, hi]]) => {
     const t = l.targets && l.targets[k];
