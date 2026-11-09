@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.19.0';
+const APP_VERSION = '2.19.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -2443,6 +2443,10 @@ const BACK_RE = /\b(my back|back (?:is|was|feels?|felt|pain|hurts?|hurting|sore|
 const RUN_PARTS = /\b(ankles?|knees?|shins?|feet|foot|calf|calves|hips?|achilles|heels?|it band|hamstrings?)\b/;
 const NEG_BEFORE = /\b(no|not|never|without|zero|nothing|isn'?t|wasn'?t|didn'?t|don'?t|doesn'?t|aren'?t|weren'?t|hasn'?t|haven'?t|less|hardly)(?: \S+){0,2} ?$/;
 const NEG_AFTER = /^ ?(free|is gone|gone|went away)\b/;
+// "Felt a pinch but it didn't hurt": a no-pain line in the same sentence cancels the soft words
+// (pinch, click, pop), but not a real one like "hurts" ("no pain in my back, but my knee hurts").
+const PAIN_DENY = /\b(?:(?:didn'?t|doesn'?t|don'?t|did not|does not|wasn'?t|isn'?t|not|no|never|without)(?: \S+)? (?:hurt|hurting|pain|painful)|painless|pain free)\b/;
+const PAIN_SOFT = /^(?:sharp|tweak|tweaky|strain|pinch(?:ed|ing|y)?|twinge|tender|clicking|popping)$/;
 const RECOVERED = /\b(better|fine|healed|recovered|gone|went away|no longer|all good|feels? good|felt good|feels? great|felt great)\b/;
 const LIFT_GENERIC = new Set(['db', 'dumbbell', 'dumbbells', 'bb', 'barbell', 'machine', 'cable', 'cables', 'seated', 'standing', 'smith', 'the', 'of', 'with', 'single', 'one', 'arm', 'press', 'row', 'curl', 'fly', 'flye', 'raise', 'extension', 'lying', 'stack', 'and', 'or', 'up']);
 const MOVE_WORDS = new Set(['press', 'row', 'curl', 'fly', 'flye', 'raise', 'extension']);
@@ -2477,11 +2481,14 @@ function parseNotes(text, ctx = {}) {
   const lifts = liftAliases(ctx.lifts || []), out = [], seen = new Set();
   const add = x => { const k = `${x.k}|${x.about || ''}`; if (!seen.has(k)) { seen.add(k); out.push(x); } };
   // Two lifts in one sentence ("bench was easy, incline was heavy"): each comma part stands alone.
-  const clauses = t.split(/[.!?;\n]+|\bbut\b|\bthough\b|\bhowever\b|\bwhile\b/i).flatMap(c => {
-    const n = lifts.filter(L => L.res.some(r => r.test(noteText(c)))).length;
-    return n > 1 && /,/.test(c) ? c.split(',') : [c];
+  const clauses = t.split(/[.!?;\n]+/).flatMap(sent => {
+    const deny = PAIN_DENY.test(noteText(sent));
+    return sent.split(/\bbut\b|\bthough\b|\bhowever\b|\bwhile\b/i).flatMap(c => {
+      const n = lifts.filter(L => L.res.some(r => r.test(noteText(c)))).length;
+      return n > 1 && /,/.test(c) ? c.split(',') : [c];
+    }).map(c => ({ c, deny }));
   });
-  clauses.forEach(raw => {
+  clauses.forEach(({ c: raw, deny }) => {
     const quote = raw.trim().replace(/^(and|so|then)\s+/i, '');
     let rest = noteText(raw);
     if (!rest.trim()) return;
@@ -2497,7 +2504,7 @@ function parseNotes(text, ctx = {}) {
       return { word: m[1], neg };
     };
     const ok = x => (x && !x.neg ? x : null);
-    const sore = !recovered && ok(hit('sore')), pain = !recovered && ok(hit('pain'));
+    const sore = !recovered && ok(hit('sore')), painHit = !recovered && ok(hit('pain')), pain = painHit && !(deny && PAIN_SOFT.test(painHit.word)) ? painHit : null;
     const easyHit = hit('easy'), easy = ok(easyHit), hard = ok(hit('hard')) || (easyHit && easyHit.neg ? { word: `not ${easyHit.word}` } : null);
     const cramp = ok(hit('cramp')), sick = ok(hit('sick')), tired = ok(hit('tired')), heat = ctx.pace && ok(hit('heat'));
     const parts = [];
