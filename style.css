@@ -974,3 +974,6 @@ body.has-timer .streak-pill { visibility: hidden; }
 .photos.insp img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
 .photos.insp span.good { color: var(--good); }
 .photos.insp span.warn { color: var(--warn, #f0a14a); }
+.ol-insp-grp { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 6px; }
+.ol-insp-grp:first-of-type { margin-top: 4px; }
+.ol-insp-grp small { color: var(--mut, #9a9a9a); font-size: 12px; }

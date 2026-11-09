@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.18.1';
+const APP_VERSION = '2.19.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -799,7 +799,8 @@ function coachPlan(t, recent, opts = {}) {
   // An all-out last set still gets one more rep next time (training close to failure builds muscle),
   // unless your reps dipped from the time before at the same weight.
   const p2 = recent[1];
-  if (last.sets[last.sets.length - 1].rir === 0 && last.sets.some(x => +x.r < hi) && p2 && Math.max(...p2.sets.map(s => +s.w || 0)) === top && total(last) < total(p2)) {
+  // You always push hard, so a set with no effort answer counts as all-out.
+  if ((last.sets[last.sets.length - 1].rir || 0) === 0 && last.sets.some(x => +x.r < hi) && p2 && Math.max(...p2.sets.map(s => +s.w || 0)) === top && total(last) < total(p2)) {
     return plan('hold', prev, reps, `Last set was all-out and reps dipped. Match ${wTxt(top)} before adding reps.`);
   }
   if (quickAndStrong(last)) {
@@ -3142,7 +3143,6 @@ function exBlock(w, i, letter) {
     ${banner}
     <div class="sets">${rows}</div>
     ${sayHTML(w, i)}
-    ${rirAsk(w, i)}
     <div class="ex-tools">
       <button data-a="add-set" data-wid="${w.id}" data-ex="${i}">+ Set</button>
       ${e.sets.length > 1 ? `<button data-a="rm-set" data-wid="${w.id}" data-ex="${i}">− Set</button>` : ''}
@@ -3164,19 +3164,8 @@ function isFolded(w, i) {
   const e = w.exercises[i];
   if (w.date !== todayStr() || !e.sets.length || !e.sets.every(s => s.done) || (S.unfold || {})[`${w.id}:${i}`]) return false;
   const last = e.sets[e.sets.length - 1];
-  return last.rir != null || S.settings.askRir === false || w.exercises.some((x, k) => k > i && x.group !== e.group && x.sets.some(s => s.done));
+  return true;
 }
-// After the last set of a lift: could you have done one more rep? Yes is saved as 2 reps left, No as 0
-// (all-out), so older answers (0 to 3) still read the same way.
-function rirAsk(w, i) {
-  const e = w.exercises[i], j = e.sets.length - 1, s = e.sets[j];
-  if (S.settings.askRir === false || w.date !== todayStr() || !e.sets.every(x => x.done) || targetOf(e).unit === 'steps') return '';
-  return `<div class="rir">
-      <span>That last set: could you have done one more rep?</span>
-      <div class="seg">${[[2, 'Yes'], [0, 'No']].map(([v, n]) => `<button class="${s.rir === v ? 'on' : ''}" data-a="rir" data-wid="${w.id}" data-ex="${i}" data-s="${j}" data-v="${v}">${n}</button>`).join('')}</div>
-    </div>`;
-}
-
 function notesCard(w) {
   return `<div class="card">
     <label class="lbl" for="notes-${w.id}">Workout notes</label>
@@ -4008,10 +3997,6 @@ function viewMore() {
       <div class="rem-row" style="margin-top:14px">
         <div><b>Smart rest</b><small>Big lifts like presses, rows, and squats get ${fmtClock(Math.max(S.settings.restSec, 150))} (${fmtClock(Math.max(S.settings.restSec, 180))} at 8 reps or fewer). Smaller lifts like curls and raises use the time above.</small></div>
         <button class="toggle ${S.settings.smartRest ? 'on' : ''}" data-a="smart-rest">${S.settings.smartRest ? 'On' : 'Off'}</button>
-      </div>
-      <div class="rem-row" style="margin-top:14px">
-        <div><b>Ask how hard it was</b><small>After the last set of each lift: could you have done one more rep? A no means it was all-out. You still go for one more rep next time, unless your reps dipped, then you match it first.</small></div>
-        <button class="toggle ${S.settings.askRir !== false ? 'on' : ''}" data-a="ask-rir">${S.settings.askRir !== false ? 'On' : 'Off'}</button>
       </div>
       <div class="sh-hint">Pops up in the top corner after each set. Partway through a superset round it counts up instead. iPhone doesn't let web apps vibrate, so it beeps and flashes the screen. Keep the app open and your ringer on to hear it.</div>
     </div>
@@ -5063,7 +5048,8 @@ function viewOutlook() {
 // Physiques you like, with your trainer's estimates, plus body targets sized for your height. The
 // pictures and numbers come from your trainer (plan.look) or from you, and stay on this phone: they're
 // not in backups, not in trainer syncs, and never in the app's code.
-const INSPO_TIER = { h: ['good', 'Halloween'], stretch: ['', 'Stretch'], long: ['warn', 'Years out'], lean: ['', 'Lean goal'] };
+const INSPO_TIER = { h: ['good', 'Halloween'], lean: ['', 'Abs goal'], stretch: ['', '~2 years'], long: ['warn', '4+ years'] };
+const INSPO_GROUPS = [['Short term', 'By Halloween 2027', ['h', 'lean']], ['Long term', 'Two years and beyond', ['stretch', 'long']], ['Your picks', '', [null]]];
 const LOOK_ROWS = [['weight', 'Weight', ' lb'], ['bf', 'Body fat', '%'], ['chest', 'Chest', '″'], ['arm', 'Arms (flexed)', '″'], ['waist', 'Waist', '″'], ['thigh', 'Thighs', '″']];
 const saveInspo = () => DB.put('kv', { k: 'inspo', v: S.inspo }).catch(saveFailed);
 const fmtIn = n => `${Math.floor(n / 12)}′${Math.round(n % 12)}″`;
@@ -5089,7 +5075,11 @@ function inspoCard() {
   return `<h2>Inspiration</h2>
     <div class="card">
       ${look.text ? `<p class="ol-insp-txt">${esc(look.text)}</p>` : ''}
-      ${ps.length ? `<div class="photos insp">${ps.map(p => { const t = INSPO_TIER[p.tier]; return `<button data-a="inspo-open" data-id="${esc(p.id)}" aria-label="Inspiration photo"><img src="${p.img}" alt="" loading="lazy">${t ? `<span class="${t[0]}">${t[1]}</span>` : ''}</button>`; }).join('')}</div>` : ''}
+      ${INSPO_GROUPS.map(([name, sub, tiers]) => {
+        const g = tiers.flatMap(t => ps.filter(p => (INSPO_TIER[p.tier] ? p.tier : null) === t));
+        return g.length ? `<div class="ol-insp-grp"><b>${name}</b>${sub ? `<small>${sub}</small>` : ''}</div>
+      <div class="photos insp">${g.map(p => { const t = INSPO_TIER[p.tier]; return `<button data-a="inspo-open" data-id="${esc(p.id)}" aria-label="Inspiration photo"><img src="${p.img}" alt="" loading="lazy">${t ? `<span class="${t[0]}">${t[1]}</span>` : ''}</button>`; }).join('')}</div>` : '';
+      }).join('')}
       <button class="btn block" data-a="inspo-add">+ Add a photo</button>
       <div class="sh-hint">Builds you want to work toward. Tap one for its estimates. They stay on this phone: not in backups or trainer syncs.</div>
     </div>`;
@@ -5104,7 +5094,7 @@ function inspoSheetHTML() {
     return `<tr><th>${n}</th><td>${round1(e[k])}″</td><td>${now != null ? `${round1(now)}″` : '–'}</td><td class="acc">${h != null ? `${round1(h)}″` : '–'}</td></tr>`;
   }).join('');
   return `<div class="sh-grip"></div>
-    <div class="sh-title">${p.mine ? 'Your pick' : t ? `${t[1]} tier` : 'Estimates'}</div>
+    <div class="sh-title">${p.mine ? 'Your pick' : t ? `${['h', 'lean'].includes(p.tier) ? 'Short term' : 'Long term'} · ${t[1]}` : 'Estimates'}</div>
     <div class="photo-view"><figure><img src="${p.img}" alt="Inspiration photo"></figure></div>
     ${e.wt ? `<p class="ol-insp-est">About <b>${esc(fmtIn(e.htIn || 70))}</b>, <b>${e.wt} lb</b>, <b>${esc(e.bf || '?')}</b> body fat.${scaled ? ` The same look at your height is about <b>${scaled} lb</b>.` : ''}</p>` : ''}
     ${rows ? `<table class="ol-tgt"><thead><tr><th></th><th>Him</th><th>You now</th><th>Halloween</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
@@ -5827,7 +5817,6 @@ const ACT = {
     else { S.tab = 'history'; S.view = { name: 'workout', id: w.id, back: null }; }
     render(); scrollTo(0, 0);
   },
-  'ask-rir': () => { S.settings.askRir = S.settings.askRir === false; saveSettings(); render(); },
   'welcome-done': () => { S.settings.welcomed = true; saveSettings(); render(); },
   'open-w': d => { S.view = { name: 'workout', id: d.id, back: S.view }; render(); scrollTo(0, 0); },
   'del-w': d => {
