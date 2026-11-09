@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.17.1';
+const APP_VERSION = '2.18.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -523,6 +523,7 @@ async function loadState() {
   S.body = {};
   (await DB.all('body')).forEach(b => { S.body[b.date] = b; });
   S.photos = await DB.all('photos').catch(() => []);
+  S.inspo = kv.inspo || [];
   S.draft = null;
   freezeTargets();
   // Today's workout may already be saved with the hack squat in it: swap any not started yet.
@@ -4218,7 +4219,7 @@ function renderSheet() {
   document.body.classList.add('sheet-open');
   // A close button that stays in reach while the sheet scrolls.
   $('#sheet-panel').innerHTML = `<div class="sh-top"><button class="sh-x" data-a="sheet-close" aria-label="Close">${ic('x')}</button></div>`
-    + ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
+    + ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, inspo: inspoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
 }
 // Swipe a sheet down to close it: from the top edge, or anywhere once it's scrolled to the top.
 (function sheetSwipe() {
@@ -4635,12 +4636,14 @@ function applyCoachPlan(plan) {
   saveSettings();
   const note = String(plan.note || '').trim().slice(0, 1500), outlook = String(plan.outlook || '').trim().slice(0, 600);
   if (outlook) { S.settings.outlookNote = { date: todayStr(), text: outlook }; saveSettings(); }
+  const look = plan.look && typeof plan.look === 'object' ? plan.look : null;
+  if (look) applyLook(look);
   const prog = JSON.parse(JSON.stringify(S.program));
   const lines = (Array.isArray(plan.changes) ? plan.changes.slice(0, 12) : []).map(c => {
     const t2 = coachOp(prog, c);
     return t2 && { t: t2, why: String((c && c.why) || '').trim().slice(0, 200) };
   }).filter(Boolean);
-  if (!note && !lines.length) { if (outlook && !S.sheet && !typing()) render(); return; }
+  if (!note && !lines.length) { if ((outlook || look) && !S.sheet && !typing()) render(); return; }
   const entry = { id: t.lastId, date: todayStr(), note, lines, seen: false, undone: false };
   if (lines.length) {
     DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program } }).catch(() => {});
@@ -4930,7 +4933,7 @@ const OL_AREAS = [
   { k: 'glutes', name: 'Glutes', of: ['glutes'], look: 'round, strong glutes from the side' },
   { k: 'back', name: 'Back', of: ['lats', 'back'], look: 'a wide V from behind' },
   { k: 'shoulders', name: 'Shoulders', of: ['shoulders'], look: 'capped, wide shoulders' },
-  { k: 'arms', name: 'Arms', of: ['arms', 'armSize'], look: 'tank-top arms (about 15" flexed)' },
+  { k: 'arms', name: 'Arms', of: ['arms', 'armSize'], look: 'tank-top arms (about 15.5" flexed)' },
 ];
 const OL_MILES = [
   { k: 'mirror', p: 0.25, title: 'You see it in the mirror', body: 'Fuller chest and shoulders, tighter shirts. You notice first.' },
@@ -5049,7 +5052,91 @@ function viewOutlook() {
     <h2>Your goals</h2>
     <p class="sh-hint" style="margin:-4px 4px 10px">Lift targets show now → Halloween, for 12 reps. The Halloween numbers are about 70% of the way to the fully built strength standards for your size.</p>
     <div class="card">${areas}</div>
+    ${bodyTargetsCard()}
+    ${inspoCard()}
     <p class="sh-hint center" style="margin:6px 12px 18px">Dates assume you keep your current pace. They come from your levels and a growth curve for steady natural training, and they're checked every night by your trainer.</p>`;
+}
+
+// ----- inspiration board -----
+// Physiques you like, with your trainer's estimates, plus body targets sized for your height. The
+// pictures and numbers come from your trainer (plan.look) or from you, and stay on this phone: they're
+// not in backups, not in trainer syncs, and never in the app's code.
+const INSPO_TIER = { h: ['good', 'Halloween'], stretch: ['', 'Stretch'], long: ['warn', 'Years out'], lean: ['', 'Lean goal'] };
+const LOOK_ROWS = [['weight', 'Weight', ' lb'], ['bf', 'Body fat', '%'], ['chest', 'Chest', '″'], ['arm', 'Arms (flexed)', '″'], ['waist', 'Waist', '″'], ['thigh', 'Thighs', '″']];
+const saveInspo = () => DB.put('kv', { k: 'inspo', v: S.inspo }).catch(saveFailed);
+const fmtIn = n => `${Math.floor(n / 12)}′${Math.round(n % 12)}″`;
+function lookNow(k) {
+  if (k === 'weight') { const t = weightTrend(todayStr()); return t ? t.avg : null; }
+  if (k === 'bf') { const t = ((S.settings.look || {}).targets || {}).bf; return t && t.now != null ? t.now : null; }
+  const h = measureHistory().filter(b => b.meas[k]);
+  return h.length ? h[h.length - 1].meas[k] : null;
+}
+function bodyTargetsCard() {
+  const tg = (S.settings.look || {}).targets;
+  if (!tg) return '';
+  const rows = LOOK_ROWS.filter(([k]) => tg[k]).map(([k, n, u]) => {
+    const now = lookNow(k), t = tg[k], f = v => (v == null ? '–' : `${k === 'bf' ? '~' : ''}${round1(v)}${u}`);
+    return `<tr><th>${n}</th><td>${f(now)}</td><td class="acc">${f(t.h)}</td><td>${f(t.built)}</td></tr>`;
+  }).join('');
+  return `<h2>Body targets</h2>
+    <div class="card"><table class="ol-tgt"><thead><tr><th></th><th>Now</th><th>Halloween</th><th>Built</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="sh-hint">Sized for your height (${esc(fmtIn(S.settings.profile.heightIn || 75))}) from the physiques you picked. Now uses your latest measurements and two-week weight average.</div></div>`;
+}
+function inspoCard() {
+  const look = S.settings.look || {}, ps = S.inspo || [];
+  return `<h2>Inspiration</h2>
+    <div class="card">
+      ${look.text ? `<p class="ol-insp-txt">${esc(look.text)}</p>` : ''}
+      ${ps.length ? `<div class="photos insp">${ps.map(p => { const t = INSPO_TIER[p.tier]; return `<button data-a="inspo-open" data-id="${esc(p.id)}" aria-label="Inspiration photo"><img src="${p.img}" alt="" loading="lazy">${t ? `<span class="${t[0]}">${t[1]}</span>` : ''}</button>`; }).join('')}</div>` : ''}
+      <button class="btn block" data-a="inspo-add">+ Add a photo</button>
+      <div class="sh-hint">Builds you want to work toward. Tap one for its estimates. They stay on this phone: not in backups or trainer syncs.</div>
+    </div>`;
+}
+function inspoSheetHTML() {
+  const p = (S.inspo || []).find(x => x.id === S.sheet.id);
+  if (!p) return '';
+  const e = p.est || {}, tg = (S.settings.look || {}).targets || {}, myH = S.settings.profile.heightIn || 75, t = INSPO_TIER[p.tier];
+  const scaled = e.wt && e.htIn ? Math.round(e.wt * (myH / e.htIn) ** 2 / 5) * 5 : null;
+  const rows = [['chest', 'Chest'], ['arm', 'Arms (flexed)'], ['waist', 'Waist'], ['thigh', 'Thighs']].filter(([k]) => e[k]).map(([k, n]) => {
+    const now = lookNow(k), h = tg[k] && tg[k].h;
+    return `<tr><th>${n}</th><td>${round1(e[k])}″</td><td>${now != null ? `${round1(now)}″` : '–'}</td><td class="acc">${h != null ? `${round1(h)}″` : '–'}</td></tr>`;
+  }).join('');
+  return `<div class="sh-grip"></div>
+    <div class="sh-title">${p.mine ? 'Your pick' : t ? `${t[1]} tier` : 'Estimates'}</div>
+    <div class="photo-view"><figure><img src="${p.img}" alt="Inspiration photo"></figure></div>
+    ${e.wt ? `<p class="ol-insp-est">About <b>${esc(fmtIn(e.htIn || 70))}</b>, <b>${e.wt} lb</b>, <b>${esc(e.bf || '?')}</b> body fat.${scaled ? ` The same look at your height is about <b>${scaled} lb</b>.` : ''}</p>` : ''}
+    ${rows ? `<table class="ol-tgt"><thead><tr><th></th><th>Him</th><th>You now</th><th>Halloween</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
+    ${p.take ? `<p class="ol-insp-est">${esc(p.take)}</p>` : ''}
+    ${e.wt ? '<div class="sh-hint">Eyeball estimates from one photo, so give or take a few pounds and half an inch. Ad photos use lighting, pumps, and posing.</div>' : ''}
+    <div class="sheet-actions">
+      <button class="btn danger block" data-a="inspo-del">Remove from board</button>
+      <button class="btn ghost block" data-a="sheet-close">Close</button>
+    </div>`;
+}
+// The trainer's look update: targets, a short read, and a fresh set of pictures (yours stay).
+function applyLook(l) {
+  const n = (v, lo, hi) => (v != null && Number.isFinite(+v) && +v >= lo && +v <= hi ? +v : null);
+  const s = (v, max) => String(v || '').trim().slice(0, max);
+  const look = { date: todayStr(), text: s(l.text, 900), targets: {} };
+  const lim = { weight: [90, 400], bf: [3, 40], chest: [25, 70], arm: [8, 30], waist: [20, 60], thigh: [12, 45] };
+  Object.entries(lim).forEach(([k, [lo, hi]]) => {
+    const t = l.targets && l.targets[k];
+    if (t && (n(t.h, lo, hi) != null || n(t.built, lo, hi) != null)) look.targets[k] = { h: n(t.h, lo, hi), built: n(t.built, lo, hi), now: n(t.now, lo, hi) };
+  });
+  if (!Object.keys(look.targets).length) delete look.targets;
+  S.settings.look = look;
+  saveSettings();
+  if (Array.isArray(l.pics)) {
+    const pics = l.pics.slice(0, 30).filter(p => p && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p.img || '') && p.img.length < 600000).map((p, i) => {
+      const e = p.est || {};
+      return {
+        id: s(p.id, 30) || `t${i}`, img: p.img, tier: INSPO_TIER[p.tier] ? p.tier : null, take: s(p.take, 300),
+        est: { htIn: n(e.htIn, 55, 90), wt: n(e.wt, 90, 400), bf: s(e.bf, 12), chest: n(e.chest, 25, 70), arm: n(e.arm, 8, 30), waist: n(e.waist, 20, 60), thigh: n(e.thigh, 12, 45) },
+      };
+    });
+    S.inspo = [...pics, ...(S.inspo || []).filter(p => p.mine)];
+    saveInspo();
+  }
 }
 
 // Runs after every render: level-ups right away, level drops once a day.
@@ -5260,6 +5347,7 @@ async function importData(f) {
     kv.put({ k: 'program', v: d.program || defaultProgram() });
     kv.put({ k: 'settings', v: { ...DEFAULT_SETTINGS, ...(d.settings || {}) } });
     kv.put({ k: 'foods', v: d.foods || [] });
+    if (S.inspo && S.inspo.length) kv.put({ k: 'inspo', v: S.inspo });
     d.workouts.forEach(w => wo.put(w));
     (d.body || []).forEach(x => bo.put(x));
   });
@@ -5687,6 +5775,13 @@ const ACT = {
     saveBody(b); closeSheet(); render(); toast('Measurements saved');
   },
   'photo-add': () => $('#photo-file').click(),
+  'inspo-add': () => $('#inspo-file').click(),
+  'inspo-open': d => { S.sheet = { kind: 'inspo', id: d.id }; renderSheet(); },
+  'inspo-del': () => {
+    if (!confirm('Remove this photo from your board?')) return;
+    S.inspo = S.inspo.filter(p => p.id !== S.sheet.id);
+    saveInspo(); closeSheet(); render(); toast('Removed');
+  },
   'photo-open': d => { S.sheet = { kind: 'photo', id: d.id }; renderSheet(); },
   'photo-compare': () => { S.sheet.compare = !S.sheet.compare; renderSheet(); },
   'photo-del': () => {
@@ -6046,6 +6141,12 @@ document.addEventListener('change', ev => {
   } else if (el.dataset.cmp && S.view && S.view.name === 'compare') {
     S.view = { ...S.view, [el.dataset.cmp]: el.value };
     render();
+  } else if (el.id === 'inspo-file' && el.files[0]) {
+    const f = el.files[0];
+    el.value = '';
+    shrinkPhoto(f).then(blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Could not read that photo')); r.readAsDataURL(blob); }))
+      .then(img => { S.inspo = [...(S.inspo || []), { id: uid('i'), img, mine: true, at: Date.now() }]; return saveInspo().then(() => { render(); toast('Added to your board'); }); })
+      .catch(err => toast(`Couldn't add that photo: ${err.message}`));
   } else if (el.id === 'photo-file' && el.files[0]) {
     const f = el.files[0];
     el.value = '';

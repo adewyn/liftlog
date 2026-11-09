@@ -963,3 +963,14 @@ body.has-timer .streak-pill { visibility: hidden; }
 .ol-lift { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; margin-top: 4px; }
 .ol-lift span { color: var(--mut); }
 .ol-lift b { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ol-tgt { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; margin: 2px 0 8px; }
+.ol-tgt th, .ol-tgt td { padding: 7px 4px; text-align: right; white-space: nowrap; }
+.ol-tgt th:first-child { text-align: left; font-weight: 600; white-space: normal; }
+.ol-tgt thead th { color: var(--mut); font-size: 12px; font-weight: 600; }
+.ol-tgt tbody tr + tr { border-top: 1px solid var(--line); }
+.ol-tgt .acc { color: var(--acc); font-weight: 700; }
+.ol-insp-txt { margin: 0 0 12px; font-size: 14px; line-height: 1.45; }
+.ol-insp-est { margin: 8px 0; font-size: 15px; line-height: 1.45; }
+.photos.insp img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.photos.insp span.good { color: var(--good); }
+.photos.insp span.warn { color: var(--warn, #f0a14a); }
