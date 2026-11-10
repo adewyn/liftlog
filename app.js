@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.21.1';
+const APP_VERSION = '2.21.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4919,8 +4919,9 @@ function lvValue(sk, ses, date) {
   if (sk.k === 'weight') return lvWeight(date);
   if (sk.k === 'habit') {
     if (!lvFirstDate()) return null;
-    const from = addDays(date, -55);
-    return { v: new Set(S.workouts.filter(w => w.date >= from && w.date <= date && hasWork(w)).map(w => w.date)).size };
+    // A day you haven't logged yet doesn't count against you: until something's logged, the 8 weeks end yesterday.
+    const end = S.workouts.some(w => w.date === date && hasWork(w)) ? date : addDays(date, -1), from = addDays(end, -55);
+    return { v: new Set(S.workouts.filter(w => w.date >= from && w.date <= end && hasWork(w)).map(w => w.date)).size };
   }
   return null;
 }
@@ -4999,7 +5000,7 @@ function lvWhy(s, was) {
   if (s.k === 'weight') return `Your two-week average is ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
   if (s.k === 'waist') return `Your waist measured ${lvFmt(s, s.v)}${old ? `, up from ${lvFmt(s, old)}` : ''}.`;
   if (s.meas) return `Your ${s.name.toLowerCase().replace(' size', '')} measured ${lvFmt(s, s.v)}${old ? `, down from ${lvFmt(s, old)}` : ''}.`;
-  return `${Math.round(s.v)} workout days in the last 8 weeks${old ? `, down from ${Math.round(old)}` : ''}.`;
+  return `${Math.round(s.v)} workout day${Math.round(s.v) === 1 ? '' : 's'} in the last 8 weeks${old ? `, down from ${Math.round(old)}` : ''}.`;
 }
 const lvTry = s => (s.k === 'weight' ? `For size, hold steady or gain slowly: eat a little more and hit your protein (${liveTarget(todayStr())} g).` : LV_TRY[s.k]);
 
@@ -5254,7 +5255,10 @@ function checkLevels() {
       st.v = LV_V; saveSettings();
       return;
     }
-    const before = lvOverall(st.shown), ups = [], downs = [], checkDown = st.downDay !== today;
+    // Consistency drops are checked once a week (the first time you open the app each week), so a rest
+    // day or a morning before you've logged anything never shows a drop.
+    if (st.habitWeek == null) { st.habitWeek = weekStart(today); saveSettings(); }
+    const before = lvOverall(st.shown), ups = [], downs = [], checkDown = st.downDay !== today, checkHabit = st.habitWeek !== weekStart(today);
     let changed = false;
     skills.forEach(s => {
       const was = st.shown[s.k];
@@ -5262,9 +5266,10 @@ function checkLevels() {
       if (Math.floor(s.lv) > was) ups.push({ s, from: was, to: Math.floor(s.lv) });
       // Lifts and runs only slip from time off (3+ weeks without them). While you keep training one,
       // a lighter day (a planned deload, a care day, more reps at less weight) never costs a level.
-      else if (checkDown && s.lv < was - 1 && !((LV_LIFTS[s.k] || s.k === 'cardio') && !(s.idle > 21))) downs.push({ s, from: was, to: Math.floor(s.lv) + 1, old: st.vals[s.k] });
+      else if ((s.k === 'habit' ? checkHabit : checkDown) && s.lv < was - 1 && !((LV_LIFTS[s.k] || s.k === 'cardio') && !(s.idle > 21))) downs.push({ s, from: was, to: Math.floor(s.lv) + 1, old: st.vals[s.k] });
     });
     if (checkDown) { st.downDay = today; changed = true; }
+    if (checkHabit) { st.habitWeek = weekStart(today); changed = true; }
     [...ups, ...downs].forEach(c => { st.shown[c.s.k] = c.to; st.vals[c.s.k] = c.s.v; changed = true; });
     if (changed) saveSettings();
     const after = lvOverall(st.shown);
