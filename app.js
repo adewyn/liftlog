@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.21.2';
+const APP_VERSION = '2.21.3';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -5232,6 +5232,19 @@ function applyLook(l, id) {
   }
 }
 
+// What earned a level-up: the exact set (lifts, runs) or measurement behind it. If you later fix a typo
+// or delete it, the level-up goes away with it. Bodyweight and Consistency have no single source.
+function lvSrc(s) {
+  if ((LV_LIFTS[s.k] || s.k === 'cardio') && s.best) return { date: s.best.date, v: s.best.v };
+  if (s.meas && s.on) return { date: s.on, v: s.v };
+  return null;
+}
+function lvSrcLive(k, src, ses) {
+  const sk = LV_SKILLS.find(x => x.k === k);
+  if (!sk || !src) return true;
+  if (sk.meas) return Object.values(S.body).some(b => b.date === src.date && b.meas && +b.meas[sk.meas] === src.v);
+  return (ses[k] || []).some(x => x.date === src.date && Math.abs(x.v - src.v) < 0.01);
+}
 // Runs after every render: level-ups right away, level drops once a day.
 function checkLevels() {
   if (S.lvChecking || document.querySelector('.lv-pop')) return;
@@ -5260,6 +5273,21 @@ function checkLevels() {
     if (st.habitWeek == null) { st.habitWeek = weekStart(today); saveSettings(); }
     const before = lvOverall(st.shown), ups = [], downs = [], checkDown = st.downDay !== today, checkHabit = st.habitWeek !== weekStart(today);
     let changed = false;
+    // A level-up whose set or measurement is gone (edited or deleted) is undone, back to what your log
+    // still supports, with no sad pop-up: nothing slipped, the log was just fixed.
+    const ups0 = st.upAt || {}, fixed = [];
+    if (Object.keys(ups0).length) {
+      const ses = lvSessions();
+      skills.forEach(s => {
+        const u = ups0[s.k];
+        if (!u || lvSrcLive(s.k, u.src, ses)) return;
+        const to = Math.min(st.shown[s.k], Math.max(u.from, Math.floor(s.lv)));
+        if (to < st.shown[s.k]) fixed.push(`${s.name} ${to}`);
+        st.shown[s.k] = to; st.vals[s.k] = s.v; delete ups0[s.k]; changed = true;
+      });
+      st.upAt = ups0;
+      if (fixed.length) toast(`Level fixed after your edit: ${fixed.join(', ')}`);
+    }
     skills.forEach(s => {
       const was = st.shown[s.k];
       if (was == null) { st.bases[s.k] = s.base; st.shown[s.k] = Math.floor(s.lv); st.vals[s.k] = s.v; changed = true; return; }
@@ -5271,6 +5299,8 @@ function checkLevels() {
     if (checkDown) { st.downDay = today; changed = true; }
     if (checkHabit) { st.habitWeek = weekStart(today); changed = true; }
     [...ups, ...downs].forEach(c => { st.shown[c.s.k] = c.to; st.vals[c.s.k] = c.s.v; changed = true; });
+    ups.forEach(c => { const src = lvSrc(c.s); st.upAt = st.upAt || {}; if (src) st.upAt[c.s.k] = { src, from: c.from }; });
+    downs.forEach(c => { if (st.upAt) delete st.upAt[c.s.k]; });
     if (changed) saveSettings();
     const after = lvOverall(st.shown);
     if (ups.length) lvPop({ kind: 'up', list: ups, from: before, to: downs.length ? before : after });
