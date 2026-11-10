@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.20.0';
+const APP_VERSION = '2.21.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1849,7 +1849,14 @@ function setReaction(w, i, j, tip) {
   }
   const pw = s.pw === '' || s.pw == null ? null : +s.pw;
   if (easyDay && pw != null && (wt > pw || (s.pr && r >= +s.pr + 3))) add('easy', 60, 'Easy day, remember. Leave 2 or 3 in the tank.', 'care', { act: true, once: 'easy' });
+  else if (!easyDay && bigJump(s, wt)) add('jump', 62, `${fmtW(wt)} lb is a big jump over today's ${fmtW(pw)}. ${ranged && r < lo ? `Reps fell short, so go back to ${fmtW(pw)} for the rest.` : 'Reps held, so the plan will catch up. Bigger jumps than this are where strains happen.'}`, 'care', { act: true, once: `jp:${e.key}` });
   else if (!easyDay && pw && wt >= pw * 1.1 && ranged && r >= lo) add('heavy', 50, `Went heavier and still hit ${r}. Strong.`, 'good', { once: `hv:${e.key}` });
+  // The first set of the day: lifting day after day with no rest.
+  if (done.length === 1 && !w.exercises.some((x, k) => k !== i && doneSets(x).length)) {
+    const n = liftStreakBefore(w.date) + 1;
+    if (n >= 6) add('streak', 70, `Day ${n} of lifting in a row. Muscle grows while you rest, so take tomorrow fully off.`, 'care', { act: true, once: 'streak', why: WHY.rest_day });
+    else if (!isTrainingDay(w.date) && n >= 3) add('streak', 70, `Lifting on a rest day, ${n} days straight. Go easy today and rest tomorrow.`, 'care', { act: true, once: 'streak', why: WHY.rest_day });
+  }
   if (t.sets && j + 1 >= t.sets + 2) add('extra', 48, `${j + 1 - t.sets} extra sets on this one. Fine if it feels good, but the payoff tapers from here.`, 'care', { act: true, once: `x:${e.key}`, why: WHY.sessionSets });
   Object.entries(musclesOf(e.name)).filter(([, f]) => f >= 1).forEach(([m]) => {
     const n = sum(w.exercises.map(x => ((musclesOf(x.name)[m] || 0) >= 1 ? doneSets(x).length : 0)));
@@ -1885,7 +1892,8 @@ function setReaction(w, i, j, tip) {
   let act = acts[0];
   const drop = acts.find(x => x.k === 'drop');
   if (act && drop && act !== drop) act = { ...act, t: `${act.t} Adding 30 sec to your rest too.`, rest: drop.rest, why: drop.why };
-  [...acts, praise].forEach(x => { if (x && x.once) st.once[x.once] = true; });
+  // Only what's actually said is marked as said; a warning that lost out this set can still show next set.
+  [act, act && act.rest && drop, praise].forEach(x => { if (x && x.once) st.once[x.once] = true; });
   if (praise && praise.score >= 70) st.big = (st.big || 0) + 1;
   if (praise && praise.lv) lvRemember(e.key, praise.lv, w.date);
   // A big moment and something to act on: say both, the good news first.
@@ -2424,7 +2432,7 @@ const NOTE_SIG = {
   sore: /\b(sore|soreness|tight|tightness|stiff|stiffness|achy|aching|aches?|doms)\b/,
   pain: /\b(pain|painful|hurts?|hurting|sharp|tweak(?:ed|y)?|strain(?:ed)?|pulled|pinch(?:ed|ing|y)?|injur(?:y|ed)|twinge|tender|swollen|throbbing|clicking|popping)\b/,
   easy: /\b(easy|too light|felt light|was light|breeze|more in the tank|could(?:'ve| have)? done more|could do more)\b/,
-  hard: /\b(hard|heavy|tough|grind(?:y|ed|ing)?|struggl(?:e|ed|ing)|fail(?:ed|ure)?|barely|brutal|killer|form broke)\b/,
+  hard: /\b(hard|heavy|tough|grind(?:y|ed|ing)?|struggl(?:e|ed|ing)|fail(?:ed|ure)?|barely|brutal|killer|form broke|all out|nothing left|maxed out|max effort|gassed|couldn'?t (?:do|get|finish) (?:another|one more))\b/,
   cramp: /\b(cramp(?:s|ed|ing|y)?|charley horse|spasms?)\b/,
   sick: /\b(sick|ill|flu|fever|covid|nause(?:a|ous)|stomach bug|food poisoning|migraine|under the weather|(?:a|head|chest) cold)\b/,
   tired: /\b(tired|exhausted|drained|wiped|fatigued|no energy|low energy|sluggish|sleepy|groggy)\b/,
@@ -2928,6 +2936,27 @@ function todaySummary(date, w) {
   </div>`;
 }
 
+// ----- pushing too far -----
+// You like to push, so the app says when it's too much: lifting day after day with no rest, going
+// all-out on lots of lifts (from your notes), or jumping well past the plan's weights.
+const liftedOn = date => S.workouts.some(x => x.date === date && (x.exercises || []).some(e => doneSets(e).length));
+function liftStreakBefore(date) {
+  let n = 0;
+  while (n < 30 && liftedOn(addDays(date, -(n + 1)))) n++;
+  return n;
+}
+const bigJump = (s, wt) => { const pw = s.pw === '' || s.pw == null ? null : +s.pw; return pw > 0 && wt >= pw * 1.15 && wt - pw >= 10; };
+function pushGuard(w) {
+  if (w.type !== 'strength' || w.date !== todayStr() || !hasWork(w)) return '';
+  const out = [], n = liftStreakBefore(w.date) + 1;
+  if (n >= 6) out.push(`<b>Day ${n} of lifting in a row.</b> Muscle grows while you rest, so take tomorrow fully off. A walk is fine.`);
+  else if (!isTrainingDay(w.date) && n >= 3) out.push(`<b>Lifting on a rest day, ${n} days straight.</b> Go easy today and rest tomorrow. Rest is when the muscle gets built.`);
+  const hard = [...new Set(workoutSigs(w).filter(x => x.k === 'lift-hard').map(x => x.about))];
+  if (hard.length >= 3) out.push(`<b>${hard.length} lifts went all-out or felt hard today.</b> Going to failure now and then is fine. On most sets, stopping 1 or 2 reps short builds the same muscle and you recover faster.`);
+  const jumps = w.exercises.filter(e => e.sets.some(x => x.done && bigJump(x, +x.w || 0)));
+  if (jumps.length >= 2) out.push(`<b>Well over the plan on ${jumps.length} lifts.</b> Big jumps are where strains happen. The plan adds weight in steps you can keep.`);
+  return out.length ? `<div class="card tip care">${out.join('<br><br>')}</div>` : '';
+}
 // After a week or more away: a welcome back, and a short version for busy days.
 function comebackCard(w) {
   if (w.type !== 'strength' || hasWork(w) || !w.exercises.length) return '';
@@ -3017,6 +3046,7 @@ function viewToday() {
     ${todaySummary(date, w)}
     ${noteBanner(date)}
     ${comebackCard(w)}
+    ${pushGuard(w)}
     ${w.type === 'strength' && deloadState(date).active ? deloadCard(date) : ''}
     ${weekChips(date)}
     <button class="linkbtn diff-btn ${custom ? 'on' : ''}" data-a="pick-other">${custom ? '✓ Doing a different workout · change' : '+ Different workout (saved or blank)'}</button>
