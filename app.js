@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.21.0';
+const APP_VERSION = '2.21.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -5260,7 +5260,9 @@ function checkLevels() {
       const was = st.shown[s.k];
       if (was == null) { st.bases[s.k] = s.base; st.shown[s.k] = Math.floor(s.lv); st.vals[s.k] = s.v; changed = true; return; }
       if (Math.floor(s.lv) > was) ups.push({ s, from: was, to: Math.floor(s.lv) });
-      else if (checkDown && s.lv < was - 1) downs.push({ s, from: was, to: Math.floor(s.lv) + 1, old: st.vals[s.k] });
+      // Lifts and runs only slip from time off (3+ weeks without them). While you keep training one,
+      // a lighter day (a planned deload, a care day, more reps at less weight) never costs a level.
+      else if (checkDown && s.lv < was - 1 && !((LV_LIFTS[s.k] || s.k === 'cardio') && !(s.idle > 21))) downs.push({ s, from: was, to: Math.floor(s.lv) + 1, old: st.vals[s.k] });
     });
     if (checkDown) { st.downDay = today; changed = true; }
     [...ups, ...downs].forEach(c => { st.shown[c.s.k] = c.to; st.vals[c.s.k] = c.s.v; changed = true; });
