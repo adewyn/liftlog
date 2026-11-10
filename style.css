@@ -977,3 +977,23 @@ body.has-timer .streak-pill { visibility: hidden; }
 .ol-insp-grp { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 6px; }
 .ol-insp-grp:first-of-type { margin-top: 4px; }
 .ol-insp-grp small { color: var(--mut, #9a9a9a); font-size: 12px; }
+.ph-day { display: flex; align-items: center; gap: 8px; margin: 4px 0 6px; }
+.ph-day small { color: var(--mut); font-size: 12px; flex: 1; }
+.ph-pump { font-size: 12px; font-weight: 650; padding: 4px 10px; border-radius: 999px; color: var(--mut); box-shadow: inset 0 0 0 1.5px var(--s3); min-height: 30px; }
+.ph-pump.on { background: var(--acc); color: var(--acc-ink); box-shadow: none; }
+.pc-slide { position: relative; aspect-ratio: 3 / 4; max-height: 62vh; margin: 10px auto 4px; border-radius: 14px; overflow: hidden; background: var(--s2); touch-action: none; user-select: none; -webkit-user-select: none; cursor: ew-resize; }
+.pc-slide img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top; pointer-events: none; -webkit-user-drag: none; }
+.pc-slide img.top { clip-path: inset(0 0 0 var(--x)); }
+.pc-line { position: absolute; top: 0; bottom: 0; left: var(--x); width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 6px rgba(0, 0, 0, .5); pointer-events: none; }
+.pc-line i { position: absolute; top: 50%; left: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; background: #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, .4); }
+.pc-line i::before { content: '‹ ›'; position: absolute; inset: 0; display: grid; place-items: center; color: #111; font-size: 15px; font-weight: 800; font-style: normal; letter-spacing: 2px; }
+.pc-tag { position: absolute; bottom: 8px; font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 6px; background: rgba(0, 0, 0, .6); color: #fff; pointer-events: none; }
+.pc-tag.l { left: 8px; } .pc-tag.r { right: 8px; }
+.pc-strip { display: flex; gap: 6px; overflow-x: auto; padding: 2px 2px 8px; scrollbar-width: none; }
+.pc-strip::-webkit-scrollbar { display: none; }
+.pc-strip button { position: relative; flex: 0 0 64px; aspect-ratio: 3 / 4; border-radius: 10px; overflow: hidden; background: var(--s2); opacity: .7; }
+.pc-strip button.on { opacity: 1; box-shadow: 0 0 0 2.5px var(--acc); }
+.pc-strip img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
+.pc-strip span { position: absolute; left: 3px; top: 3px; font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: #fff; }
+.pc-strip em { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10px; font-style: normal; font-weight: 700; text-align: center; padding: 2px 0; background: rgba(0, 0, 0, .55); color: #fff; }
+.sh-hint.warn { color: var(--warn, #f0a14a); }

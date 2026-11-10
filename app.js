@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.19.1';
+const APP_VERSION = '2.20.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -3678,31 +3678,94 @@ function measSheetHTML() {
 // Progress photos stay in this phone's storage (not in backups), shrunk to about 1280 px.
 const photoUrls = new Map();
 const photoUrl = p => { if (!photoUrls.has(p.id)) photoUrls.set(p.id, URL.createObjectURL(p.blob)); return photoUrls.get(p.id); };
+const POSES = [['front', 'Front'], ['side', 'Side'], ['back', 'Back'], ['flex', 'Flex']];
+const poseName = p => (POSES.find(x => x[0] === p.pose) || [])[1] || '';
+const phDate = (d, o = {}) => fmtDate(d, { month: 'short', day: 'numeric', ...(d.slice(0, 4) !== todayStr().slice(0, 4) || o.year ? { year: 'numeric' } : {}) });
+const photoThumb = (p, a, extra = '') => `<button data-a="${a}" data-id="${p.id}"${extra} aria-label="Photo from ${esc(fmtDate(p.date))}"><img src="${photoUrl(p)}" alt="" loading="lazy">${poseName(p) ? `<span>${poseName(p)}</span>` : ''}</button>`;
+// Photos grouped by day, newest first; the newest three days show, the rest fold away.
 function photoCard() {
-  const ps = [...S.photos].sort((a, c) => c.date.localeCompare(a.date) || c.at - a.at);
+  const ps = [...S.photos].sort((a, c) => c.date.localeCompare(a.date) || a.at - c.at);
+  const days = [...new Set(ps.map(p => p.date))], shown = S.photoAll ? days : days.slice(0, 3);
+  const due = !ps.length || ps[0].date <= addDays(todayStr(), -85);
   return `<h2>Progress photos</h2>
     <div class="card">
-      ${ps.length ? `<div class="photos">${ps.slice(0, 9).map(p => `<button data-a="photo-open" data-id="${p.id}" aria-label="Photo from ${esc(fmtDate(p.date))}"><img src="${photoUrl(p)}" alt=""><span>${esc(fmtDate(p.date, { month: 'short', day: 'numeric' }))}</span></button>`).join('')}</div>` : ''}
-      <button class="btn ${!ps.length || ps[0].date <= addDays(todayStr(), -85) ? 'pri' : ''} block" data-a="photo-add">${ps.length && ps[0].date <= addDays(todayStr(), -85) ? '+ Time for new photos' : '+ Add a photo'}</button>
-      <div class="sh-hint">Same spot, same light, every 3 months. Photos stay on this phone and aren't in backups.</div>
+      ${shown.map(d => {
+        const g = ps.filter(p => p.date === d), pumped = g.every(p => p.pumped);
+        return `<div class="ph-day"><b>${esc(phDate(d))}</b><small>${g.length} photo${g.length > 1 ? 's' : ''}</small>
+          <button class="ph-pump ${pumped ? 'on' : ''}" data-a="photo-day-pump" data-d="${d}" aria-pressed="${pumped}">${pumped ? 'Pumped' : 'Pumped?'}</button></div>
+        <div class="photos">${g.map(p => photoThumb(p, 'photo-open')).join('')}</div>`;
+      }).join('')}
+      ${days.length > 3 ? `<button class="btn ghost block" data-a="photo-all">${S.photoAll ? 'Show fewer' : `Show all ${days.length} days`}</button>` : ''}
+      <div class="add-row" style="grid-template-columns:repeat(${days.length > 1 ? 2 : 1},1fr);margin-top:4px">
+        <button class="btn ${due ? 'pri' : ''}" data-a="photo-add">${ps.length && due ? '+ Time for new photos' : '+ Add photos'}</button>
+        ${days.length > 1 ? '<button class="btn" data-a="pcmp-open">Compare</button>' : ''}
+      </div>
+      <div class="sh-hint">Pick several at once. Same spot, same light, before you eat is fairest. Tap “Pumped?” on a day you took them after a workout. Photos stay on this phone and aren't in backups.</div>
     </div>`;
 }
 function photoSheetHTML() {
   const p = S.photos.find(x => x.id === S.sheet.id);
   if (!p) return '';
-  const first = [...S.photos].sort((a, c) => a.date.localeCompare(c.date))[0];
-  const cmp = S.sheet.compare && first && first.id !== p.id;
+  const others = S.photos.some(x => x.date !== p.date);
   return `<div class="sh-grip"></div>
     <div class="sh-title">${esc(fmtDate(p.date, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }))}</div>
-    <div class="photo-view ${cmp ? 'two' : ''}">
-      ${cmp ? `<figure><img src="${photoUrl(first)}" alt="First photo"><figcaption>${esc(fmtDate(first.date, { month: 'short', day: 'numeric', year: 'numeric' }))}</figcaption></figure>` : ''}
-      <figure><img src="${photoUrl(p)}" alt="Progress photo">${cmp ? `<figcaption>${esc(fmtDate(p.date, { month: 'short', day: 'numeric', year: 'numeric' }))}</figcaption>` : ''}</figure>
-    </div>
+    <div class="photo-view"><figure><img src="${photoUrl(p)}" alt="Progress photo"></figure></div>
+    <div class="lbl">Pose</div>
+    <div class="seg">${POSES.map(([k, n]) => `<button class="${p.pose === k ? 'on' : ''}" data-a="photo-pose" data-v="${k}">${n}</button>`).join('')}</div>
+    <div class="alt-row pick-row" style="margin-top:8px"><button class="chip ${p.pumped ? 'on' : ''}" data-a="photo-pump">${p.pumped ? 'Pumped (after a workout)' : 'Not pumped'}</button></div>
     <div class="sheet-actions">
-      ${first && first.id !== p.id && first.date !== p.date ? `<button class="btn block" data-a="photo-compare">${cmp ? 'Show just this one' : 'Compare with your first'}</button>` : ''}
+      ${others ? `<button class="btn pri block" data-a="pcmp-open" data-id="${p.id}">Compare with another day</button>` : ''}
       <button class="btn danger block" data-a="photo-del">Delete photo</button>
       <button class="btn ghost block" data-a="sheet-close">Close</button>
     </div>`;
+}
+// Compare: any two photos, as a slider (drag to wipe between them) or side by side, with your weight
+// and tape from each date. It starts on the same pose from your earliest day.
+function pcmpPick(bId) {
+  const asc = [...S.photos].sort((a, c) => a.date.localeCompare(c.date) || a.at - c.at);
+  const b = asc.find(p => p.id === bId) || asc[asc.length - 1];
+  const older = asc.filter(p => p.date !== b.date);
+  const a = (b.pose && older.find(p => p.pose === b.pose)) || older.find(p => !!p.pumped === !!b.pumped) || older[0];
+  return { a: a && a.id, b: b && b.id };
+}
+// Each picker row scrolls to the photo picked in it.
+const pcStripFocus = () => document.querySelectorAll('.pc-strip').forEach(el => { const b = el.querySelector('.on'); if (b) el.scrollLeft += b.getBoundingClientRect().left - el.getBoundingClientRect().left - (el.clientWidth - b.offsetWidth) / 2; });
+function measOn(date) {
+  const h = measureHistory().filter(m => m.date <= addDays(date, 7));
+  return h.length ? h[h.length - 1] : null;
+}
+function pcmpSheetHTML() {
+  const sh = S.sheet, asc = [...S.photos].sort((a, c) => a.date.localeCompare(c.date) || a.at - c.at);
+  const A = asc.find(p => p.id === sh.a), B = asc.find(p => p.id === sh.b);
+  if (!A || !B) return '<div class="sh-title">Compare photos</div><div class="sh-hint">Add photos on two different days to compare them.</div>';
+  const [o, n] = A.date <= B.date ? [A, B] : [B, A];
+  const gap = daysBetween(o.date, n.date), gapTxt = gap < 14 ? `${gap} day${gap === 1 ? '' : 's'}` : gap < 70 ? `${Math.round(gap / 7)} weeks` : `${Math.round(gap / 30.4)} months`;
+  const wt = d => { const t = weightTrend(d); if (t) return t.avg; const b = Object.values(S.body).filter(x => x.weight != null && x.date <= d && x.date >= addDays(d, -10)).sort((x, y) => y.date.localeCompare(x.date))[0]; return b ? +b.weight : null; };
+  const mo = measOn(o.date), mn = measOn(n.date), same = mo && mn && mo.date === mn.date;
+  const rows = [['Weight', wt(o.date), wt(n.date), ' lb', 'up'], ...(same ? [] : [['Chest', 'chest', '', '″', 'up'], ['Arms', 'arm', '', '″', 'up'], ['Waist', 'waist', '', '″', 'down']].map(([nm, k, , u, dir]) => [nm, mo && mo.meas[k], mn && mn.meas[k], u, dir]))]
+    .filter(r => r[1] != null && r[2] != null).map(([nm, x, y, u, dir]) => {
+      const d = round1(y - x), good = d === 0 ? '' : (d > 0) === (dir === 'up') ? 'good' : 'bad';
+      return `<tr><th>${nm}</th><td>${round1(x)}${u}</td><td>${round1(y)}${u}</td><td class="cmp-d ${good}">${d === 0 ? '—' : `${d > 0 ? '+' : ''}${d}${u}`}</td></tr>`;
+    }).join('');
+  const cap = p => `${esc(phDate(p.date, { year: 1 }))}${poseName(p) ? ` · ${poseName(p)}` : ''}${p.pumped ? ' · pumped' : ''}`;
+  const strip = side => `<div class="pc-strip">${asc.map(p => photoThumb(p, 'pcmp-pick', ` data-side="${side}" class="${sh[side] === p.id ? 'on' : ''}"`).replace('</button>', `<em>${esc(fmtDate(p.date, { month: 'short', day: 'numeric' }))}</em></button>`)).join('')}</div>`;
+  const slide = sh.mode !== 'side';
+  return `<div class="sh-grip"></div>
+    <div class="sh-title">Compare photos</div>
+    <div class="seg"><button class="${slide ? 'on' : ''}" data-a="pcmp-mode" data-v="slide">Slider</button><button class="${slide ? '' : 'on'}" data-a="pcmp-mode" data-v="side">Side by side</button></div>
+    ${slide ? `<div class="pc-slide" id="pc-slide" style="--x:${sh.x ?? 50}%">
+        <img src="${photoUrl(o)}" alt="Earlier photo"><img class="top" src="${photoUrl(n)}" alt="Later photo">
+        <div class="pc-line"><i></i></div><span class="pc-tag l">${esc(phDate(o.date))}</span><span class="pc-tag r">${esc(phDate(n.date))}</span>
+      </div>
+      <div class="sh-hint center">Drag across the photo to wipe between them.</div>`
+    : `<div class="photo-view two"><figure><img src="${photoUrl(o)}" alt="Earlier photo"><figcaption>${cap(o)}</figcaption></figure><figure><img src="${photoUrl(n)}" alt="Later photo"><figcaption>${cap(n)}</figcaption></figure></div>`}
+    <p class="ol-insp-est"><b>${gapTxt}</b> apart${slide ? ` · ${cap(o)} → ${cap(n)}` : ''}.</p>
+    ${!!o.pumped !== !!n.pumped ? `<div class="sh-hint warn">Only the ${o.pumped ? 'earlier' : 'later'} one is pumped, so it looks bigger than it really is.</div>` : ''}
+    ${o.pose && n.pose && o.pose !== n.pose ? '<div class="sh-hint warn">Different poses. Pick the same pose for a fair look.</div>' : ''}
+    ${rows ? `<table class="ol-tgt"><thead><tr><th></th><th>${esc(phDate(o.date))}</th><th>${esc(phDate(n.date))}</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : ''}
+    <div class="lbl" style="margin-top:12px">First photo</div>${strip('a')}
+    <div class="lbl">Second photo</div>${strip('b')}
+    <div class="sheet-actions"><button class="btn ghost block" data-a="sheet-close">Close</button></div>`;
 }
 function shrinkPhoto(file) {
   return new Promise((res, rej) => {
@@ -4211,7 +4274,7 @@ function renderSheet() {
   document.body.classList.add('sheet-open');
   // A close button that stays in reach while the sheet scrolls.
   $('#sheet-panel').innerHTML = `<div class="sh-top"><button class="sh-x" data-a="sheet-close" aria-label="Close">${ic('x')}</button></div>`
-    + ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, inspo: inspoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
+    + ({ set: setSheetHTML, ex: exSheetHTML, act: actSheetHTML, other: otherSheetHTML, meas: measSheetHTML, photo: photoSheetHTML, pcmp: pcmpSheetHTML, inspo: inspoSheetHTML, past: pastSheetHTML, info: infoSheetHTML })[S.sheet.kind]();
 }
 // Swipe a sheet down to close it: from the top edge, or anywhere once it's scrolled to the top.
 (function sheetSwipe() {
@@ -4221,7 +4284,7 @@ function renderSheet() {
   panel.addEventListener('touchstart', ev => {
     if (ev.touches.length !== 1) return;
     const t = ev.target, nearTop = ev.touches[0].clientY - panel.getBoundingClientRect().top < 56;
-    armed = (panel.scrollTop <= 0 || nearTop) && !t.closest('input, textarea, select');
+    armed = (panel.scrollTop <= 0 || nearTop) && !t.closest('input, textarea, select, .pc-slide, .pc-strip');
     y0 = ev.touches[0].clientY; t0 = Date.now(); dy = 0; drag = false;
   }, { passive: true });
   panel.addEventListener('touchmove', ev => {
@@ -4496,7 +4559,7 @@ function trainerSnapshot() {
     program: S.program, settings, workouts: S.workouts,
     body: Object.values(S.body),
     proteinToday: liveTarget(todayStr()),
-    photos: S.photos.map(p => ({ id: p.id, date: p.date })),
+    photos: S.photos.map(p => ({ id: p.id, date: p.date, pose: p.pose || null, pumped: !!p.pumped })),
     coachLog: S.coachLog.slice(0, 10).map(c => ({ id: c.id, date: c.date, undone: !!c.undone })),
   };
 }
@@ -5782,7 +5845,22 @@ const ACT = {
     saveInspo(); closeSheet(); render(); toast('Removed');
   },
   'photo-open': d => { S.sheet = { kind: 'photo', id: d.id }; renderSheet(); },
-  'photo-compare': () => { S.sheet.compare = !S.sheet.compare; renderSheet(); },
+  'photo-all': () => { S.photoAll = !S.photoAll; render(); },
+  'photo-pose': d => { const p = S.photos.find(x => x.id === S.sheet.id); if (!p) return; p.pose = p.pose === d.v ? null : d.v; DB.put('photos', p).catch(saveFailed); renderSheet(); render(); },
+  'photo-pump': () => { const p = S.photos.find(x => x.id === S.sheet.id); if (!p) return; p.pumped = !p.pumped; DB.put('photos', p).catch(saveFailed); renderSheet(); render(); },
+  'photo-day-pump': d => {
+    const g = S.photos.filter(p => p.date === d.d), on = !g.every(p => p.pumped);
+    g.forEach(p => { p.pumped = on; DB.put('photos', p).catch(saveFailed); });
+    render(); toast(on ? 'Marked as pumped. Compare fairly against other pumped days.' : 'Marked as not pumped');
+  },
+  'pcmp-open': d => { if (S.photos.length < 2) return; S.sheet = { kind: 'pcmp', ...pcmpPick(d.id), mode: 'slide', x: 50 }; renderSheet(); pcStripFocus(); },
+  'pcmp-mode': d => { S.sheet.mode = d.v; renderSheet(); pcStripFocus(); },
+  'pcmp-pick': d => {
+    const keep = [...document.querySelectorAll('.pc-strip')].map(el => el.scrollLeft), top = $('#sheet-panel').scrollTop;
+    S.sheet[d.side] = d.id; renderSheet();
+    document.querySelectorAll('.pc-strip').forEach((el, i) => { el.scrollLeft = keep[i] || 0; });
+    $('#sheet-panel').scrollTop = top;
+  },
   'photo-del': () => {
     if (!confirm('Delete this photo? This can\'t be undone.')) return;
     const id = S.sheet.id;
@@ -6090,6 +6168,20 @@ function actTimeSync(w, k, f) {
   const d = document.getElementById(`act-dur-${k}`);
   if (d) d.textContent = durText(a);
 }
+// Compare slider: drag anywhere on the photo to move the wipe.
+document.addEventListener('pointerdown', ev => {
+  const box = ev.target.closest && ev.target.closest('#pc-slide');
+  if (!box) return;
+  const move = e => {
+    const r = box.getBoundingClientRect(), x = Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100));
+    box.style.setProperty('--x', `${x}%`);
+    if (S.sheet && S.sheet.kind === 'pcmp') S.sheet.x = Math.round(x);
+  };
+  move(ev);
+  box.setPointerCapture && box.setPointerCapture(ev.pointerId);
+  const up = () => { box.removeEventListener('pointermove', move); box.removeEventListener('pointerup', up); box.removeEventListener('pointercancel', up); };
+  box.addEventListener('pointermove', move); box.addEventListener('pointerup', up); box.addEventListener('pointercancel', up);
+});
 document.addEventListener('input', ev => {
   const el = ev.target;
   if (el.dataset.wb && el.dataset.wb !== 'date') {
@@ -6145,14 +6237,23 @@ document.addEventListener('change', ev => {
     shrinkPhoto(f).then(blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Could not read that photo')); r.readAsDataURL(blob); }))
       .then(img => { S.inspo = [...(S.inspo || []), { id: uid('i'), img, mine: true, at: Date.now() }]; return saveInspo().then(() => { render(); toast('Added to your board'); }); })
       .catch(err => toast(`Couldn't add that photo: ${err.message}`));
-  } else if (el.id === 'photo-file' && el.files[0]) {
-    const f = el.files[0];
+  } else if (el.id === 'photo-file' && el.files.length) {
+    // Several at once: each is shrunk and saved in turn, in the order you picked them.
+    const files = [...el.files], base = Date.now();
     el.value = '';
-    shrinkPhoto(f).then(blob => {
-      const p = { id: uid('p'), date: S.bodyDate, at: Date.now(), blob };
-      S.photos.push(p);
-      return DB.put('photos', p).then(() => { render(); toast('Photo saved on this phone'); });
-    }).catch(err => toast(`Couldn't save that photo: ${err.message}`));
+    if (files.length > 1) toast(`Saving ${files.length} photos…`);
+    (async () => {
+      let n = 0, bad = 0;
+      for (const [i, f] of files.entries()) {
+        try {
+          const p = { id: uid('p'), date: S.bodyDate, at: base + i, blob: await shrinkPhoto(f) };
+          await DB.put('photos', p);
+          S.photos.push(p); n++;
+        } catch (err) { bad++; }
+      }
+      render();
+      toast(n ? `${n === 1 ? 'Photo' : `${n} photos`} saved on this phone${bad ? `. ${bad} couldn't be read` : ''}` : "Couldn't save those photos");
+    })();
   } else if (el.id === 'rem-time' && el.value) {
     reminderTimeChanged('time', el.value);
   } else if (el.id === 'rem-streak-time' && el.value) {
