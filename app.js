@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.21.3';
+const APP_VERSION = '2.21.4';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -5149,7 +5149,7 @@ function viewOutlook() {
 // Physiques you like, with your trainer's estimates, plus body targets sized for your height. The
 // pictures and numbers come from your trainer (plan.look) or from you, and stay on this phone: they're
 // not in backups, not in trainer syncs, and never in the app's code.
-const INSPO_TIER = { h: ['good', 'Halloween'], lean: ['', 'Abs goal'], stretch: ['', '~2 years'], long: ['warn', '4+ years'] };
+const INSPO_TIER = { h: ['good', 'Halloween'], lean: ['', 'Abs goal'], stretch: ['', '2–3 years'], long: ['warn', '4+ years'] };
 const INSPO_GROUPS = [['Short term', 'By Halloween 2027', ['h', 'lean']], ['Long term', 'Two years and beyond', ['stretch', 'long']], ['Your picks', '', [null]]];
 const LOOK_ROWS = [['weight', 'Weight', ' lb'], ['bf', 'Body fat', '%'], ['chest', 'Chest', '″'], ['arm', 'Arms (flexed)', '″'], ['waist', 'Waist', '″'], ['thigh', 'Thighs', '″']];
 const saveInspo = () => DB.put('kv', { k: 'inspo', v: S.inspo }).catch(saveFailed);
@@ -5169,7 +5169,7 @@ function bodyTargetsCard() {
   }).join('');
   return `<h2>Body targets</h2>
     <div class="card"><table class="ol-tgt"><thead><tr><th></th><th>Now</th><th>Halloween</th><th>Built</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="sh-hint">Sized for your height (${esc(fmtIn(S.settings.profile.heightIn || 75))}) from the physiques you picked. Now uses your latest measurements and two-week weight average.</div></div>`;
+    <div class="sh-hint">Sized for your height (${esc(fmtIn(S.settings.profile.heightIn || 75))}) from the physiques you picked. Built is about 3 years of steady lifting. Now uses your latest measurements and two-week weight average.</div></div>`;
 }
 function inspoCard() {
   const look = S.settings.look || {}, ps = S.inspo || [];
