@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.21.4';
+const APP_VERSION = '2.21.5';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -5220,7 +5220,7 @@ function applyLook(l, id) {
   S.settings.look = look;
   saveSettings();
   if (Array.isArray(l.pics)) {
-    const pics = l.pics.slice(0, 30).filter(p => p && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p.img || '') && p.img.length < 600000).map((p, i) => {
+    const pics = l.pics.slice(0, 60).filter(p => p && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p.img || '') && p.img.length < 600000).map((p, i) => {
       const e = p.est || {};
       return {
         id: s(p.id, 30) || `t${i}`, img: p.img, tier: INSPO_TIER[p.tier] ? p.tier : null, take: s(p.take, 300),
