@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.22.0';
+const APP_VERSION = '2.22.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -5150,7 +5150,7 @@ function viewOutlook() {
 // pictures and numbers come from your trainer (plan.look) or from you, and stay on this phone: they're
 // not in backups, not in trainer syncs, and never in the app's code.
 const INSPO_TIER = { h: ['good', 'Halloween'], lean: ['', 'Abs goal'], yr2: ['', '2 years'], stretch: ['', '3 years'], long: ['warn', '4+ years'] };
-const INSPO_GROUPS = [['Short term', 'By Halloween 2027', ['h', 'lean']], ['Long term', 'Two years and beyond', ['yr2', 'stretch', 'long']], ['Your picks', '', [null]]];
+const INSPO_GROUPS = [['Short term', 'By Halloween 2027', ['h', 'lean']], ['Medium term', '2 to 3 years', ['yr2', 'stretch']], ['Long term', '4+ years', ['long']], ['Your picks', '', [null]]];
 const LOOK_ROWS = [['weight', 'Weight', ' lb'], ['bf', 'Body fat', '%'], ['chest', 'Chest', '″'], ['arm', 'Arms (flexed)', '″'], ['waist', 'Waist', '″'], ['thigh', 'Thighs', '″']];
 const saveInspo = () => DB.put('kv', { k: 'inspo', v: S.inspo }).catch(saveFailed);
 const fmtIn = n => `${Math.floor(n / 12)}′${Math.round(n % 12)}″`;
@@ -5195,7 +5195,7 @@ function inspoSheetHTML() {
     return `<tr><th>${n}</th><td>${round1(e[k])}″</td><td>${now != null ? `${round1(now)}″` : '–'}</td><td class="acc">${h != null ? `${round1(h)}″` : '–'}</td></tr>`;
   }).join('');
   return `<div class="sh-grip"></div>
-    <div class="sh-title">${p.mine ? 'Your pick' : t ? `${['h', 'lean'].includes(p.tier) ? 'Short term' : 'Long term'} · ${t[1]}` : 'Estimates'}</div>
+    <div class="sh-title">${p.mine ? 'Your pick' : t ? `${['h', 'lean'].includes(p.tier) ? 'Short term' : p.tier === 'long' ? 'Long term' : 'Medium term'} · ${t[1]}` : 'Estimates'}</div>
     <div class="photo-view"><figure><img src="${p.img}" alt="Inspiration photo"></figure></div>
     ${e.wt ? `<p class="ol-insp-est">About <b>${esc(fmtIn(e.htIn || 70))}</b>, <b>${e.wt} lb</b>, <b>${esc(e.bf || '?')}</b> body fat.${scaled ? ` The same look at your height is about <b>${scaled} lb</b>.` : ''}</p>` : ''}
     ${rows ? `<table class="ol-tgt"><thead><tr><th></th><th>Him</th><th>You now</th><th>Halloween</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
