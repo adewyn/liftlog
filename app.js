@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.24.0';
+const APP_VERSION = '2.25.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4742,7 +4742,7 @@ function applyCoachPlan(plan) {
   const look = plan.look && typeof plan.look === 'object' ? plan.look : null;
   if (look) applyLook(look, plan.id);
   const prog = JSON.parse(JSON.stringify(S.program));
-  const lines = (Array.isArray(plan.changes) ? plan.changes.slice(0, 12) : []).map(c => {
+  const lines = (Array.isArray(plan.changes) ? plan.changes.slice(0, 40) : []).map(c => {
     const t2 = coachOp(prog, c);
     return t2 && { t: t2, why: String((c && c.why) || '').trim().slice(0, 200) };
   }).filter(Boolean);
