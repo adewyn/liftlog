@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.23.0';
+const APP_VERSION = '2.24.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -659,13 +659,26 @@ const isLive = w => w.date === todayStr() || Date.now() - lastSetAt(w) < 3 * 360
 const hasAny = w => hasWork(w) || !!(w.notes || '').trim() || (w.exercises || []).some(hasExNote);
 
 // ---------- workout logic ----------
-function targetText(t) {
+// One-side lifts count reps on each side: 10 per leg means 10 left and 10 right, logged as 10.
+function sideOf(e) {
+  const note = (((e && e.target) || e || {}).note || '').toLowerCase(), name = ((e && e.name) || '').toLowerCase();
+  const m = note.match(/\b(?:per|each) (side|leg|arm)\b/);
+  if (m) return m[1];
+  if (/bulgarian|split squat|lunge|step[- ]?up|single[- ]?leg|one[- ]?leg|cossack/.test(name)) return 'leg';
+  if (/single[- ]?arm|one[- ]?arm|concentration curl/.test(name)) return 'arm';
+  if (/pallof|dead ?bug|mace 360|side plank|bird ?dog|suitcase/.test(name)) return 'side';
+  return null;
+}
+function targetText(t, e) {
+  const side = e ? sideOf(e) : null;
+  if (side) t = { ...t, note: (t.note || '').replace(/\b(?:per|each) (?:side|leg|arm)\b[,;]?\s*/i, '').trim() };
   let s;
   if (t.min != null && t.max != null) s = t.min === t.max ? `${t.sets} × ${t.min}` : `${t.sets} × ${t.min}–${t.max}`;
   else if (t.min != null) s = `${t.sets} × ${t.min}+`;
   else if (t.max != null) s = `${t.sets} × up to ${t.max}`;
   else s = `${t.sets} sets`;
   if (t.unit === 'steps' && (t.min != null || t.max != null)) s += ' steps';
+  if (side) s += ` each ${side}`;
   if (t.note) s += ` · ${t.note}`;
   return s;
 }
@@ -3086,7 +3099,7 @@ function previewDay(k, date) {
   }
   const w = buildSession(k, date);
   return `<div class="card plan-card"><div class="lbl">The plan</div>
-    ${w.exercises.map(e => `<div class="row"><div>${esc(e.name)}<div class="muted small">${isHome(e) ? 'At home · ' : ''}${e.makeUp ? `Make-up from ${esc(e.makeUp)} · ` : ''}${esc(targetText(e.target))}</div></div>${e.sets[0] && +e.sets[0].w ? `<small>${fmtW(e.sets[0].w)} lb</small>` : ''}</div>`).join('')}
+    ${w.exercises.map(e => `<div class="row"><div>${esc(e.name)}<div class="muted small">${isHome(e) ? 'At home · ' : ''}${e.makeUp ? `Make-up from ${esc(e.makeUp)} · ` : ''}${esc(targetText(e.target, e))}</div></div>${e.sets[0] && +e.sets[0].w ? `<small>${fmtW(e.sets[0].w)} lb</small>` : ''}</div>`).join('')}
     ${w.exercises.some(e => e.sets[0] && +e.sets[0].w) ? '<div class="sh-hint">Weights are a guess for now. They update as you lift.</div>' : ''}</div>`;
 }
 
@@ -3142,15 +3155,15 @@ function exBlock(w, i, letter) {
   if (isFolded(w, i)) {
     return `<button class="ex ex-fold" data-a="ex-unfold" data-wid="${w.id}" data-ex="${i}">
       <span class="ex-name">${letter ? `<span class="ss-letter">${letter}</span>` : ''}${esc(e.name)}</span>
-      <span class="fold-sum">${ic('check')} ${e.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}${hasExNote(e) ? ` · ${ic('note')}` : ''}</span>${sayHTML(w, i, true)}</button>`;
+      <span class="fold-sum">${ic('check')} ${e.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}${sideOf(e) ? ` per ${sideOf(e)}` : ''}${hasExNote(e) ? ` · ${ic('note')}` : ''}</span>${sayHTML(w, i, true)}</button>`;
   }
   const last = lastPerf(e.key, w);
   const c = isLive(w) ? e.coach : null;
   // Machines logged by pin number show "#8", not "8 lb".
   const stack = isPin(e);
-  const unit = e.target.unit === 'steps' ? 'steps' : 'reps';
+  const side = sideOf(e), unit = e.target.unit === 'steps' ? 'steps' : side ? `per ${side}` : 'reps';
   const lastTxt = last
-    ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>${last.rest ? ` · rested ${fmtClock(last.rest.med)}` : ''}`
+    ? `Last time (${esc(fmtDate(last.date, { month: 'short', day: 'numeric' }))}): <b>${last.sets.map(s => `${fmtW(s.w)}×${s.r}`).join(', ')}</b>${side ? ` per ${side}` : ''}${last.rest ? ` · rested ${fmtClock(last.rest.med)}` : ''}`
     : doneSets(e).length ? '' : 'First time logging this. Enter a weight to start.';
   const keepW = (k, s) => (c.prev ? c.prev[Math.min(k, c.prev.length - 1)] : (+s.w === c.w ? c.from : +s.w));
   const canKeep = c && (c.kind === 'up' || c.kind === 'down') && e.sets.some((s, k) => !s.done && +s.w !== keepW(k, s));
@@ -3168,7 +3181,7 @@ function exBlock(w, i, letter) {
     <div class="ex-head">
       <div>
         <div class="ex-name">${letter ? `<span class="ss-letter">${letter}</span>` : ''}${esc(e.name)}</div>
-        <div class="ex-target">${e.makeUp ? `<span class="mk-tag">Make-up from ${esc(e.makeUp)}</span>` : ''}${esc(targetText(e.target))}${isLive(w) && e.target.sets && e.sets.length !== e.target.sets ? ` · <b>${e.sets.length} ${e.sets.length === 1 ? 'set' : 'sets'} today</b>` : ''}</div>
+        <div class="ex-target">${e.makeUp ? `<span class="mk-tag">Make-up from ${esc(e.makeUp)}</span>` : ''}${esc(targetText(e.target, e))}${isLive(w) && e.target.sets && e.sets.length !== e.target.sets ? ` · <b>${e.sets.length} ${e.sets.length === 1 ? 'set' : 'sets'} today</b>` : ''}</div>
       </div>
       <div class="ex-btns">
         <a class="icon-btn" href="${formUrl(e.name)}" target="_blank" rel="noopener" aria-label="How to do it">${ic('play')}</a>
@@ -4227,7 +4240,7 @@ function viewProgDay() {
       <div class="card flush ${g.length > 1 ? 'ss' : ''}">
         ${g.length > 1 ? '<div class="ss-tag" style="margin:12px 16px 0">Superset</div>' : ''}
         ${g.map((x, ei) => `<button class="row" data-a="edit-ex" data-g="${gi}" data-e="${ei}">
-          <div><b>${esc(x.name)}</b><small>${esc(targetText(x))} · ${stepTxt(x)}</small></div>${ic('chev')}</button>`).join('')}
+          <div><b>${esc(x.name)}</b><small>${esc(targetText(x, x))} · ${stepTxt(x)}</small></div>${ic('chev')}</button>`).join('')}
         <div class="ex-tools" style="padding:0 12px 12px;margin-top:0;flex-wrap:wrap">
           <button data-a="grp-move" data-g="${gi}" data-dir="-1" ${gi === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
           <button data-a="grp-move" data-g="${gi}" data-dir="1" ${gi === groups.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
@@ -4372,9 +4385,9 @@ function pastSheetHTML() {
 function setSheetHTML() {
   const sh = S.sheet, w = getW(sh.wid), e = w.exercises[sh.i], s = e.sets[sh.j];
   const steps = e.target.unit === 'steps';
-  const rd = steps ? 5 : 1, pin = isPin(e);
+  const rd = steps ? 5 : 1, pin = isPin(e), side = steps ? null : sideOf(e);
   return `<div class="sh-grip"></div>
-    <div class="sh-title">${esc(e.name)}<span>Set ${sh.j + 1} of ${e.sets.length} · target ${esc(targetText(e.target))}</span></div>
+    <div class="sh-title">${esc(e.name)}<span>Set ${sh.j + 1} of ${e.sets.length} · target ${esc(targetText(e.target, e))}</span></div>
     <label class="lbl">${pin ? 'Pin number on the stack' : 'Weight (lb)'}</label>
     ${pin ? `<div class="stepper three">
       <button class="st-btn" data-a="ss-step" data-f="w" data-d="-1">−1</button>
@@ -4392,7 +4405,8 @@ function setSheetHTML() {
       <div><b>Same ${pin ? 'pin' : 'weight'} for the next ${sh.later === 1 ? 'set' : `${sh.later} sets`}</b><small>${sh.chain ? 'A new weight here carries forward.' : 'Only this set changes, so each set keeps its own weight.'}</small></div>
       <button class="toggle ${sh.chain ? 'on' : ''}" data-a="ss-chain">${sh.chain ? 'On' : 'Off'}</button>
     </div>` : ''}
-    <label class="lbl">${steps ? 'Steps' : 'Reps'}</label>
+    <label class="lbl">${steps ? 'Steps' : side ? `Reps per ${side}` : 'Reps'}</label>
+    ${side ? `<div class="sh-hint side-hint">Count one ${side}. 10 on each ${side} means you log 10, not 20.</div>` : ''}
     <div class="stepper three">
       <button class="st-btn" data-a="ss-step" data-f="r" data-d="-${rd}">−${rd}</button>
       <input class="st-inp" inputmode="numeric" data-ssf="r" value="${esc(sh.r)}" placeholder="0">
