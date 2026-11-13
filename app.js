@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.25.1';
+const APP_VERSION = '2.26.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -27,7 +27,8 @@ const VAPID_PUBLIC = 'BA_437YE5zeBtTMqdI9k9Ek1Jl9qu4Bo9Hmuen9bQmLNGn0MwZUngKJpCJ
 const $ = sel => document.querySelector(sel);
 const uid = p => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 // A renamed lift keeps its history: the new name looks up the old one's sessions.
-const KEY_ALIAS = { 'chest press': 'chest press or dips', 'wide-grip lat pulldown': 'lat pulldown' };
+// Your old "Leg press" logs were the plate-loaded sled, so that one keeps the history. The machine gets its own.
+const KEY_ALIAS = { 'chest press': 'chest press or dips', 'wide-grip lat pulldown': 'lat pulldown', 'plate-loaded leg press': 'leg press' };
 // Close cousins: every 6-week block, a smaller lift moves to the next one in its family (see rotateBlock).
 // Big lifts stay put so they can keep climbing. Names here are ones the muscle map knows.
 const VARIANTS = [
@@ -43,6 +44,7 @@ const VARIANTS = [
   ['Calf raise', 'Seated calf raise', 'Single-leg calf raise'],
   ['Cable crunch', 'Ab crunch machine', 'Decline sit-up'],
   ['Row', 'Chest-supported row', 'Seated cable row'],
+  ['Plate-loaded leg press', 'Machine leg press'],
   ['Seated DB shoulder press', 'Shoulder press machine'],
   ['Wide-grip lat pulldown', 'Close-grip lat pulldown'],
   ['Pull-ups', 'Chin-ups'],
@@ -3444,7 +3446,7 @@ function allExercises() {
 }
 
 // Form videos for any exercise: a YouTube search, so the link never goes stale.
-const FORM_SEARCH = [[/cuban/i, 'cuban press rotator cuff'], [/rope pushdown|rope pull/i, 'rope triceps pushdown'], [/pendulum squat/i, 'pendulum squat machine'], [/mace/i, 'steel mace']];
+const FORM_SEARCH = [[/cuban/i, 'cuban press rotator cuff'], [/rope pushdown|rope pull/i, 'rope triceps pushdown'], [/pendulum squat/i, 'pendulum squat machine'], [/plate-loaded leg press/i, 'plate loaded leg press'], [/machine leg press/i, 'seated leg press machine'], [/mace/i, 'steel mace']];
 const formUrl = name => {
   const q = (FORM_SEARCH.find(([re]) => re.test(name)) || [])[1];
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${q && !/mace/i.test(q) ? q : `${name.replace(/\(.*?\)/g, '').trim()}${q ? '' : ''}`} proper form`)}`;
