@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.26.0';
+const APP_VERSION = '2.26.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -540,6 +540,13 @@ async function loadState() {
       if (/^lat pulldown$/i.test(e.name) && !e.makeUp) { e.name = 'Close-grip lat pulldown'; e.key = keyOf(e.name); if (!e.sets.some(x => x.done)) fillSets(e, w); persist(w); }
     }));
     S.settings.gripFix = 1; saveSettings();
+  }
+  // Nov 13 (your OK): Friday's leg press that day was the seated machine, so it moves to that lift's own history.
+  if (!S.settings.legFix) {
+    S.workouts.filter(w => w.date === '2026-11-13' && w.dayKey === 'fri').forEach(w => (w.exercises || []).forEach(e => {
+      if (/^leg press$/i.test(e.name) && (e.sets || []).some(x => x.done && +x.w === 170)) { e.name = 'Machine leg press'; e.key = keyOf(e.name); persist(w); }
+    }));
+    S.settings.legFix = 1; saveSettings();
   }
   // The At home list is new (2.14): today's workout, already saved, gets its day's home lifts too.
   if (!S.settings.homeAdd) {
