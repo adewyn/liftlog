@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.21.6';
+const APP_VERSION = '2.22.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -4632,7 +4632,7 @@ async function trainerPull() {
     const plan = await pushApi('coach', { k: t.k });
     if (plan && plan.id && plan.id !== t.lastId) applyCoachPlan(plan);
     // A look update that an older version skipped (or cut to 30 pictures) still lands once.
-    else if (plan && plan.look && typeof plan.look === 'object' && ((S.settings.look || {}).id !== String(plan.id) || (S.settings.look || {}).max !== 60)) { applyLook(plan.look, plan.id); if (!S.sheet && !typing()) render(); }
+    else if (plan && plan.look && typeof plan.look === 'object' && ((S.settings.look || {}).id !== String(plan.id) || (S.settings.look || {}).tv !== 2)) { applyLook(plan.look, plan.id); if (!S.sheet && !typing()) render(); }
   } catch (err) { /* offline */ }
 }
 
@@ -5149,8 +5149,8 @@ function viewOutlook() {
 // Physiques you like, with your trainer's estimates, plus body targets sized for your height. The
 // pictures and numbers come from your trainer (plan.look) or from you, and stay on this phone: they're
 // not in backups, not in trainer syncs, and never in the app's code.
-const INSPO_TIER = { h: ['good', 'Halloween'], lean: ['', 'Abs goal'], stretch: ['', '2–3 years'], long: ['warn', '4+ years'] };
-const INSPO_GROUPS = [['Short term', 'By Halloween 2027', ['h', 'lean']], ['Long term', 'Two years and beyond', ['stretch', 'long']], ['Your picks', '', [null]]];
+const INSPO_TIER = { h: ['good', 'Halloween'], lean: ['', 'Abs goal'], yr2: ['', '2 years'], stretch: ['', '3 years'], long: ['warn', '4+ years'] };
+const INSPO_GROUPS = [['Short term', 'By Halloween 2027', ['h', 'lean']], ['Long term', 'Two years and beyond', ['yr2', 'stretch', 'long']], ['Your picks', '', [null]]];
 const LOOK_ROWS = [['weight', 'Weight', ' lb'], ['bf', 'Body fat', '%'], ['chest', 'Chest', '″'], ['arm', 'Arms (flexed)', '″'], ['waist', 'Waist', '″'], ['thigh', 'Thighs', '″']];
 const saveInspo = () => DB.put('kv', { k: 'inspo', v: S.inspo }).catch(saveFailed);
 const fmtIn = n => `${Math.floor(n / 12)}′${Math.round(n % 12)}″`;
@@ -5210,7 +5210,7 @@ function inspoSheetHTML() {
 function applyLook(l, id) {
   const n = (v, lo, hi) => (v != null && Number.isFinite(+v) && +v >= lo && +v <= hi ? +v : null);
   const s = (v, max) => String(v || '').trim().slice(0, max);
-  const look = { id: String(id || '').slice(0, 60), date: todayStr(), text: s(l.text, 1200), targets: {}, max: 60 };
+  const look = { id: String(id || '').slice(0, 60), date: todayStr(), text: s(l.text, 1200), targets: {}, max: 60, tv: 2 };
   const lim = { weight: [90, 400], bf: [3, 40], chest: [25, 70], arm: [8, 30], waist: [20, 60], thigh: [12, 45] };
   Object.entries(lim).forEach(([k, [lo, hi]]) => {
     const t = l.targets && l.targets[k];
