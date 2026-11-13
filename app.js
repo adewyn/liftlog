@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.22.1';
+const APP_VERSION = '2.23.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -144,6 +144,8 @@ const fmtClock = sec => `${Math.floor(sec / 60)}:${pad(sec % 60)}`;
 const sum = a => a.reduce((x, y) => x + y, 0);
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const e1rm = (w, r) => r <= 1 ? w : w * (1 + r / 30);
+// Records show an estimated 6-rep max: the weight you could do for 6 good reps (same Epley math).
+const e6rm = (w, r) => e1rm(w, r) / 1.2;
 
 const ICONS = {
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
@@ -1829,7 +1831,7 @@ function setReaction(w, i, j, tip) {
   // never handled for real reps, or a clear jump (3%+) in estimated max. Small bests wait their turn.
   const e1 = wt && r <= 15 ? e1rm(wt, r) : 0, allBest = Math.max(0, ...h.map(p => p.e1));
   const heaviest = Math.max(0, ...h.flatMap(p => p.sets.map(x => +x.w || 0)));
-  const prWhy = { title: 'A new best', body: [`${fmtW(wt)} × ${r} works out to an estimated max of ${Math.round(e1)} lb.`, `Your best before today was about ${Math.round(allBest)} lb.`, 'Estimated max uses weight and reps together, so 10 reps at 100 and 6 at 115 compare fairly.'] };
+  const prWhy = { title: 'A new best', body: [`${fmtW(wt)} × ${r} works out to about ${Math.round(e1 / 1.2)} lb for 6 reps.`, `Your best before today was about ${Math.round(allBest / 1.2)} lb for 6.`, 'Turning every set into a 6-rep weight lets 10 reps at 100 and 6 at 115 compare fairly.'] };
   if (h.length >= 3 && wt > heaviest && heaviest && r >= (ranged ? Math.max(3, lo - 2) : 3)) add('pr', 88, `Heaviest you've ever gone on ${e.name}. 🎉`, 'good', { once: `pr:${e.key}`, big: true, why: prWhy });
   else if (e1 && h.length >= 3 && allBest && e1 > allBest * 1.03) add('pr', 82, dayPick([`New best on ${e.name}. 🎉`, `Strongest ${e.name} you've ever logged. 🎉`], e.key), 'good', { once: `pr:${e.key}`, big: true, why: prWhy });
   else if (h.length >= 3) {
@@ -3382,7 +3384,7 @@ function viewHistory() {
       <button class="row" data-a="ex-chart" data-key="${esc(x.key)}">
         <div><b>${esc(x.name)}</b><small>${x.count} session${x.count === 1 ? '' : 's'} · last ${esc(fmtDate(x.last, { month: 'short', day: 'numeric' }))}</small></div>
         <span class="val">${x.iso && x.bestSet ? `${fmtW(x.bestSet.w)}×${x.bestSet.r}` : x.best ? `${x.best}` : ''}</span>${ic('chev')}</button>`).join('')}</div>
-      <div class="foot">On the right: your best estimated 1-rep max (lb) for big lifts, and your best set for small lifts, where a 1-rep max doesn't mean much.</div>`;
+      <div class="foot">On the right: your best estimated 6-rep max (lb) for big lifts, and your best set for small lifts, where a rep max doesn't mean much.</div>`;
   }
   return `<header class="top"><h1>History</h1></header>
     <button class="btn block" data-a="past-open" style="margin-bottom:12px">+ Log a past day</button>
@@ -3405,7 +3407,7 @@ function exHistory(key) {
 function sessStats(s) {
   let top = s.sets[0];
   s.sets.forEach(x => { if (+x.w > +top.w || (+x.w === +top.w && +x.r > +top.r)) top = x; });
-  return { top, e1: Math.round(Math.max(...s.sets.map(x => e1rm(+x.w, +x.r)))), reps: sum(s.sets.map(x => +x.r)) };
+  return { top, e1: Math.round(Math.max(...s.sets.map(x => e6rm(+x.w, +x.r)))), reps: sum(s.sets.map(x => +x.r)) };
 }
 function allExercises() {
   const m = new Map();
@@ -3416,7 +3418,7 @@ function allExercises() {
     x.count++;
     if (w.date >= x.last) { x.last = w.date; x.name = e.name; }
     if (x.iso) sets.forEach(s => { if (!x.bestSet || +s.w > +x.bestSet.w || (+s.w === +x.bestSet.w && +s.r > +x.bestSet.r)) x.bestSet = s; });
-    else if (!x.steps) x.best = Math.max(x.best, Math.round(Math.max(...sets.map(s => e1rm(+s.w, +s.r)))));
+    else if (!x.steps) x.best = Math.max(x.best, Math.round(Math.max(...sets.map(s => e6rm(+s.w, +s.r)))));
     m.set(e.key, x);
   }
   return [...m.values()].sort((a, b) => b.last.localeCompare(a.last) || a.name.localeCompare(b.name));
@@ -3446,23 +3448,23 @@ function viewExercise() {
     kpis = [[Math.max(...stats.map(s => s.reps)), 'Best total reps'], [Math.max(...stats.map(s => +s.top.r)), 'Best set'], [stats.length, 'Sessions']];
   } else {
     const series = [{ name: 'Top set weight', color: 'var(--acc)', pts: stats.map(s => [s.t, +s.top.w]) }];
-    if (!steps) series.push({ name: 'Estimated 1RM', color: '#7cc4ff', pts: stats.map(s => [s.t, s.e1]) });
+    if (!steps) series.push({ name: 'Est. 6-rep max', color: '#7cc4ff', pts: stats.map(s => [s.t, s.e1]) });
     chart = lineChart(series);
     const bestTop = stats.reduce((a, s) => (+s.top.w > +a.top.w || (+s.top.w === +a.top.w && +s.top.r > +a.top.r) ? s : a), stats[0]);
-    kpis = [[`${fmtW(bestTop.top.w)}×${bestTop.top.r}`, 'Best top set'], (hist.some(h => h.iso) ? [Math.max(...stats.map(s => s.reps)), 'Best total reps'] : [steps ? stats.length : Math.max(...stats.map(s => s.e1)), steps ? 'Sessions' : 'Best est. 1RM']), [`${fmtW(stats[stats.length - 1].top.w)}×${stats[stats.length - 1].top.r}`, 'Last top set']];
+    kpis = [[`${fmtW(bestTop.top.w)}×${bestTop.top.r}`, 'Best top set'], (hist.some(h => h.iso) ? [Math.max(...stats.map(s => s.reps)), 'Best total reps'] : [steps ? stats.length : Math.max(...stats.map(s => s.e1)), steps ? 'Sessions' : 'Best est. 6-rep max']), [`${fmtW(stats[stats.length - 1].top.w)}×${stats[stats.length - 1].top.r}`, 'Last top set']];
   }
   const rows = [...stats].reverse().map(s => `<tr>
       <td>${esc(fmtDate(s.date, { month: 'short', day: 'numeric' }))}</td>
       <td>${s.sets.map(x => `${fmtW(x.w)}×${x.r}`).join(', ')}</td>
       <td>${bw || steps ? '' : s.e1}</td></tr>`).join('');
-  const head = bw || steps ? '' : '<tr><td></td><td></td><td class="muted small">Est. 1RM</td></tr>';
+  const head = bw || steps ? '' : '<tr><td></td><td></td><td class="muted small">Est. 6RM</td></tr>';
   return `${back}
     <header class="top"><h1>${esc(name)}</h1>${formLink(name)}</header>
     <div class="kpis">${kpis.map(k => `<div class="kpi"><b>${esc(k[0])}</b><span>${k[1]}</span></div>`).join('')}</div>
     <div class="card">${chart}</div>
     <h2>Sessions</h2>
     <div class="card"><table class="sess-table">${head}${rows}</table></div>
-    ${bw || steps ? (hist.some(h => h.iso) ? '<div class="foot">No 1-rep max here: for small lifts, your best set and total reps tell you more.</div>' : '') : '<div class="foot">Estimated 1RM uses the Epley formula: weight × (1 + reps ÷ 30).</div>'}`;
+    ${bw || steps ? (hist.some(h => h.iso) ? '<div class="foot">No rep max here: for small lifts, your best set and total reps tell you more.</div>' : '') : '<div class="foot">Estimated 6-rep max: the weight you could likely lift for 6 good reps, worked out from any set with the Epley formula.</div>'}`;
 }
 
 function viewWorkout() {
@@ -3931,7 +3933,7 @@ function yogaStatsCard() {
       : '<div class="muted small">Rate each class Easy, Just right, or Hard, and the picks keep adjusting.</div>'}
     </div>`;
 }
-// Your most-done lifts, each with its best estimated one-rep max.
+// Your most-done lifts, each with its best estimated 6-rep max.
 function liftBests(from, to, n = 6) {
   const m = new Map();
   for (const w of S.workouts) {
@@ -3939,7 +3941,7 @@ function liftBests(from, to, n = 6) {
     for (const e of w.exercises || []) {
       const sets = doneSets(e).filter(x => +x.w > 0 && +x.r > 0);
       if (!sets.length || isPin(e)) continue;
-      const best = Math.round(Math.max(...sets.map(x => e1rm(+x.w, +x.r))));
+      const best = Math.round(Math.max(...sets.map(x => e6rm(+x.w, +x.r))));
       const o = m.get(e.key) || { key: e.key, name: e.name, n: 0, e1: 0, date: w.date };
       o.n++;
       if (best > o.e1) { o.e1 = best; o.date = w.date; }
@@ -3953,7 +3955,7 @@ function recordsCard() {
   if (!r.longRun && !r.longWalk && !r.longHike && !lifts.length) return '';
   const row = (label, val, date) => `<div class="row"><div><b>${label}</b><small>${esc(fmtDate(date, { month: 'short', day: 'numeric', year: 'numeric' }))}</small></div><span class="val">${val}</span></div>`;
   return `<h2>Records</h2><div class="card flush">
-    ${lifts.map(l => `<button class="row" data-a="ex-chart" data-key="${esc(l.key)}"><div><b>${esc(l.name)}</b><small>Best est. 1RM · ${esc(fmtDate(l.date, { month: 'short', day: 'numeric', year: 'numeric' }))}</small></div><span class="val">${l.e1} lb</span>${ic('chev')}</button>`).join('')}
+    ${lifts.map(l => `<button class="row" data-a="ex-chart" data-key="${esc(l.key)}"><div><b>${esc(l.name)}</b><small>Best est. 6-rep max · ${esc(fmtDate(l.date, { month: 'short', day: 'numeric', year: 'numeric' }))}</small></div><span class="val">${l.e1} lb</span>${ic('chev')}</button>`).join('')}
     ${r.longRun ? row('Longest run', `${r.longRun.dist} mi`, r.longRun.date) : ''}
     ${r.fastRun ? row('Fastest run pace', `${fmtPace(r.fastRun.pace)} /mi`, r.fastRun.date) : ''}
     ${r.longWalk ? row('Longest walk', `${r.longWalk.dist} mi`, r.longWalk.date) : ''}
@@ -4054,7 +4056,7 @@ function viewCompare() {
     </div>
     ${lifts.length ? `<h2>Strongest lifts</h2><div class="card">
       <table class="cmp-table">
-        <tr class="cmp-th"><td>Best est. 1RM</td><td>${esc(periodName(a, true))}</td><td>${esc(periodName(b, true))}</td><td></td></tr>
+        <tr class="cmp-th"><td>Best est. 6-rep max</td><td>${esc(periodName(a, true))}</td><td>${esc(periodName(b, true))}</td><td></td></tr>
         ${lifts.map(l => row(esc(l.name), l.x ?? null, l.y ?? null, x => x, 1)).join('')}
       </table>
       <div class="sh-hint">— means you didn't do that lift then. Tap Records on Stats for each lift's full chart.</div></div>` : ''}`;
