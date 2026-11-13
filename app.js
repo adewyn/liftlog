@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.25.0';
+const APP_VERSION = '2.25.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -946,6 +946,12 @@ function fillSets(e, w) {
   }
   if (!plan && !recent.length && !rehab) plan = firstFrom(e, t, w);
   e.coach = plan ? { kind: plan.kind, note: plan.note, from: plan.from, w: plan.w, prev: plan.prev, ...(plan.grace > 0 ? { grace: plan.grace } : {}) } : null;
+  // Built on an older session than the one "Last time" shows (that day used a different rep range): say which.
+  const shown = lastPerf(e.key, w);
+  if (e.coach && e.coach.note && !pick.conv && !cb && basis[0] && shown && basis[0].date !== shown.date) {
+    const on = fmtDate(basis[0].date, { weekday: 'short', month: 'short', day: 'numeric' });
+    e.coach.note = /last time/.test(e.coach.note) ? e.coach.note.replace(/last time/g, `on ${on}`) : `${e.coach.note} Based on ${on}, your last ${base.min}–${base.max} rep day.`;
+  }
   const sets = Math.max(MIN_SETS, cb ? cb.n : t.sets);
   const extra = deload ? `Deload: ${sets} sets${plan ? ' about 10% lighter' : ', go lighter'}, about 3 left in the tank.`
     : low ? `Easy day: all ${sets} sets, stop each with 2 or 3 left in the tank.` : '';
