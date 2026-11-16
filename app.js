@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.27.0';
+const APP_VERSION = '2.27.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -1665,6 +1665,21 @@ function swapForGood(w, i, to) {
 }
 // Swap choices for a lift in today's session: same muscles first, gentler ones first for a lift that
 // bothers you, favorites ahead of the rest, and nothing you've marked "not for me".
+// Lifts in today's planned workout that aren't in today's session anymore (swapped or removed).
+const missingPlan = w => {
+  const plan = w && planOf(w.dayKey);
+  return plan ? [...new Map((plan.groups || []).flat().filter(x => !w.exercises.some(e => e.key === keyOf(x.name))).map(x => [keyOf(x.name), x])).values()] : [];
+};
+// Put one back as the next lift up.
+function addPlanLift(w, name) {
+  const item = missingPlan(w).find(x => keyOf(x.name) === keyOf(name));
+  if (!item) return;
+  const nx = w.exercises.findIndex(e => !isHome(e) && !e.sets.some(x => x.done));
+  const g = Math.max(-1, ...w.exercises.map(e => +e.group || 0)) + 1;
+  w.exercises.splice(isHome(item) || nx < 0 ? w.exercises.length : nx, 0, sessionExercise({ ...item }, g, w));
+  persist(w);
+  toast(`${item.name} is back${isHome(item) ? '' : ', up next'}`);
+}
 function swapPicks(w, i) {
   const ex = i != null ? w.exercises[i] : null;
   let picks = knownExercises(new Set(w.exercises.map(e => e.key))).filter(p => !disliked(p.name, isHome(ex)));
@@ -4494,13 +4509,16 @@ function exSheetHTML() {
   const title = sess ? (sh.i == null ? 'Add an exercise' : 'Change this exercise') : (sh.g == null ? 'New exercise' : 'Edit exercise');
   const ex = sess && sh.i != null ? w.exercises[sh.i] : null;
   let picks = ex ? swapPicks(w, sh.i) : sess || sh.g == null ? knownExercises(new Set(sess ? w.exercises.map(e => e.key) : [])).filter(p => !disliked(p.name)) : [];
+  if (sess && sh.i == null) { const mp = new Set(missingPlan(w).map(x => keyOf(x.name))); picks = picks.filter(p => !mp.has(keyOf(p.name))); }
   picks = picks.slice(0, ex ? 8 : 16);
   // Lifts from today's plan that got swapped or removed come first, as "Back to …", so a swap is never stuck.
-  const back = ex && plan ? [...new Map((plan.groups || []).flat().filter(x => !w.exercises.some(e => e.key === keyOf(x.name))).map(x => [keyOf(x.name), x.name])).values()] : [];
+  const back = ex ? missingPlan(w).map(x => x.name) : [];
   if (back.length) picks = [...back.map(n => ({ name: n, back: true })), ...picks.filter(p => !back.some(n => keyOf(n) === keyOf(p.name)))].slice(0, Math.max(8, back.length));
   const sample = ex ? (+(ex.sets.find(s => s.w !== '') || {}).w || 0) : 0;
   return `<div class="sh-grip"></div>
     <div class="sh-title">${title}${sess ? `<span>${sh.i == null ? 'Just for today, unless you save it below' : 'Swap it, or change today\'s sets and reps'}</span>` : ''}</div>
+    ${sess && sh.i == null && missingPlan(w).length ? `<label class="lbl">Back from today's plan (one tap)</label>
+      <div class="alt-row pick-row">${missingPlan(w).map(x => `<button class="chip" data-a="sx-addplan" data-n="${esc(x.name)}">↩ ${esc(x.name)}</button>`).join('')}</div>` : ''}
     ${picks.length ? `<label class="lbl">${sh.i == null ? 'Pick one you know' : 'Swap for (one tap)'}</label>
       <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="${ex ? 'sx-swap' : 'sf-pick'}" data-n="${esc(p.name)}">${p.back ? `↩ Back to ${esc(p.name)}` : esc(p.name)}</button>`).join('')}</div>` : ''}
     ${ex ? formLink(ex.name) : ''}
@@ -4558,11 +4576,15 @@ function recentOtherActs() {
   return out.slice(0, 6);
 }
 function actSheetHTML() {
-  const recent = recentOtherActs();
+  const recent = recentOtherActs(), w = getW(S.sheet.wid), lifts = w && w.type === 'strength' ? missingPlan(w) : [];
   const btn = (attrs, label) => `<button class="chip" data-a="act-add" ${attrs}>${esc(label)}</button>`;
   const known = new Set(recent.map(a => a.kind));
   return `<div class="sh-grip"></div>
     <div class="sh-title">Add an activity<span>Counts for your streak, calories, and tomorrow's picks</span></div>
+    ${w && w.type === 'strength' ? `<label class="lbl">Adding a lift?</label>
+      ${lifts.length ? `<div class="alt-row pick-row">${lifts.map(x => `<button class="chip" data-a="sx-addplan" data-n="${esc(x.name)}">↩ ${esc(x.name)}</button>`).join('')}</div>` : ''}
+      <button class="btn block" data-a="sx-add" data-wid="${w.id}">+ Exercise (any lift)</button>
+      <label class="lbl">Other activities</label>` : ''}
     <div class="alt-row pick-row">${Object.entries(ADD_TYPES).map(([t, n]) => btn(`data-t="${t}"`, n)).join('')}</div>
     ${recent.length ? `<label class="lbl">Recent</label><div class="alt-row pick-row">${recent.map(a => btn(`data-t="other" data-kind="${esc(a.kind)}" data-n="${esc(a.name)}"`, a.name)).join('')}</div>` : ''}
     <label class="lbl">More</label>
@@ -5814,6 +5836,7 @@ const ACT = {
     S.sheet.data = known && known.sets ? exData(classify({ ...known })) : { ...S.sheet.data, name: d.n };
     renderSheet();
   },
+  'sx-addplan': d => { const w = getW(S.sheet.wid); closeSheet(); addPlanLift(w, d.n); render(); },
   'sx-swap': d => { ACT['sf-pick'](d); saveSessExercise(); },
   'habit-swap': d => {
     const w = getW(d.wid), from = swapForGood(w, +d.ex, d.to);
