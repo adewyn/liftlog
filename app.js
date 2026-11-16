@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.26.2';
+const APP_VERSION = '2.26.3';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -678,6 +678,8 @@ function sideOf(e) {
   if (/pallof|dead ?bug|mace 360|side plank|bird ?dog|suitcase/.test(name)) return 'side';
   return null;
 }
+// Dumbbell lifts are logged per hand (two 50s = 50), so the weight says "each".
+const isDBLift = e => /\b(db|dumbbells?)\b/i.test((e && e.name) || '');
 function targetText(t, e) {
   const side = e ? sideOf(e) : null;
   if (side) t = { ...t, note: (t.note || '').replace(/\b(?:per|each) (?:side|leg|arm)\b[,;]?\s*/i, '').trim() };
@@ -3188,7 +3190,7 @@ function exBlock(w, i, letter) {
     <div class="set ${s.done ? 'done' : ''}">
       <span class="set-no">${j + 1}</span>
       <button class="set-val" data-a="edit-set" data-wid="${w.id}" data-ex="${i}" data-s="${j}" aria-label="Edit set ${j + 1}">
-        <b>${stack && s.w !== '' ? '#' : ''}${fmtW(s.w)}</b>${s.w !== '' && +s.w !== 0 && !stack ? '<small>lb</small>' : ''}<span class="x">×</span><b>${s.r === '' ? '—' : s.r}</b><small>${unit}</small>
+        <b>${stack && s.w !== '' ? '#' : ''}${fmtW(s.w)}</b>${s.w !== '' && +s.w !== 0 && !stack ? `<small>${isDBLift(e) ? 'lb each' : 'lb'}</small>` : ''}<span class="x">×</span><b>${s.r === '' ? '—' : s.r}</b><small>${unit}</small>
       </button>
       <button class="check" data-a="tick" data-wid="${w.id}" data-ex="${i}" data-s="${j}" aria-label="${s.done ? 'Undo set' : 'Log set'}">${ic('check')}</button>
     </div>`).join('');
@@ -4403,7 +4405,7 @@ function setSheetHTML() {
   const rd = steps ? 5 : 1, pin = isPin(e), side = steps ? null : sideOf(e);
   return `<div class="sh-grip"></div>
     <div class="sh-title">${esc(e.name)}<span>Set ${sh.j + 1} of ${e.sets.length} · target ${esc(targetText(e.target, e))}</span></div>
-    <label class="lbl">${pin ? 'Pin number on the stack' : 'Weight (lb)'}</label>
+    <label class="lbl">${pin ? 'Pin number on the stack' : isDBLift(e) ? 'Weight per dumbbell (lb)' : 'Weight (lb)'}</label>
     ${pin ? `<div class="stepper three">
       <button class="st-btn" data-a="ss-step" data-f="w" data-d="-1">−1</button>
       <input class="st-inp" inputmode="numeric" data-ssf="w" value="${esc(sh.w)}" placeholder="">
@@ -6039,7 +6041,8 @@ const ACT = {
     const old = s.w;
     s.w = nw; s.r = nr;
     if (!s.done) s.own = true;
-    if (S.sheet.chain && +old !== nw) e.sets.forEach((x, k) => { if (k > S.sheet.j && !x.done) x.w = nw; });
+    // A new weight carries forward with the reps you just got at it, so 100×6 doesn't leave the next sets at 9.
+    if (S.sheet.chain && +old !== nw) e.sets.forEach((x, k) => { if (k > S.sheet.j && !x.done) { x.w = nw; if (!x.own) x.r = nr; } });
     const wasDone = s.done, i = S.sheet.i, j = S.sheet.j;
     closeSheet();
     if (wasDone || (d && d.only)) { persist(w); render(); return; }
