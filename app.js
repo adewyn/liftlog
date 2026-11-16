@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.26.4';
+const APP_VERSION = '2.27.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -560,6 +560,22 @@ async function loadState() {
       (e.sets || []).forEach(x => { if (x.w !== '' && +x.w > 0) x.w = round2(+x.w / 2); });
     }); if (hit) persist(w); });
     S.settings.dbIncFix = 1; saveSettings();
+  }
+  // Nov 16 (your ask): the hip thrust machine was taken, so Hip thrust got swapped out and the later leg press
+  // became Mace lunges. Hip thrust takes the Mace lunges spot back (or comes up next if that's gone).
+  if (!S.settings.htFix) {
+    const w = S.workouts.find(x => x.date === '2026-11-16' && x.dayKey === 'mon' && x.date === todayStr()), plan = planOf('mon');
+    const item = plan && (plan.groups || []).flat().find(x => keyOf(x.name) === keyOf('Hip thrust'));
+    if (w && item && !w.exercises.some(e => e.key === keyOf('Hip thrust'))) {
+      const ml = w.exercises.findIndex(e => /mace lunge/i.test(e.name) && !e.sets.some(x => x.done));
+      if (ml >= 0) w.exercises[ml] = sessionExercise(item, w.exercises[ml].group, w);
+      else {
+        const nx = w.exercises.findIndex(e => !isHome(e) && !e.sets.some(x => x.done));
+        w.exercises.splice(nx >= 0 ? nx : w.exercises.length, 0, sessionExercise(item, Math.max(-1, ...w.exercises.map(e => +e.group || 0)) + 1, w));
+      }
+      persist(w);
+    }
+    S.settings.htFix = 1; saveSettings();
   }
   // The At home list is new (2.14): today's workout, already saved, gets its day's home lifts too.
   if (!S.settings.homeAdd) {
@@ -2326,6 +2342,7 @@ function barChart(items, target) {
 
 // ---------- rendering ----------
 function render() {
+  if (S.drag) { S.dragRender = true; return; }
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === S.tab));
   let html;
   if (S.view) html = ({ workout: viewWorkout, exercise: viewExercise, progDay: viewProgDay, compare: viewCompare })[S.view.name]();
@@ -3144,7 +3161,10 @@ function sessionStrength(w) {
     const multi = g.items.length > 1;
     const up = isLive(w) && g.items.some(i => (w.exercises[i].coach || {}).kind === 'up' && !isFolded(w, i));
     const inner = g.items.map((i, k) => exBlock(w, i, multi ? String.fromCharCode(65 + k) : '')).join('');
-    return `<section class="card ${multi ? 'ss' : ''} ${up ? 'up' : ''}">
+    // Today's lifts you haven't started can be dragged into a new order by the bar at the top.
+    const drag = w.date === todayStr() && !homeG(g) && !g.items.some(i => w.exercises[i].sets.some(s => s.done));
+    return `<section class="card ${multi ? 'ss' : ''} ${up ? 'up' : ''} ${drag ? 'dragable' : ''}" data-grp="${esc(String(g.id))}">
+      ${drag ? `<button class="drag-h" data-drag="${w.id}" aria-label="Hold and drag to reorder"><span></span></button>` : ''}
       ${multi ? '<div class="ss-tag">Superset <span>· alternate, rest after the round</span></div>' : ''}
       ${inner}
     </section>`;
@@ -4475,11 +4495,14 @@ function exSheetHTML() {
   const ex = sess && sh.i != null ? w.exercises[sh.i] : null;
   let picks = ex ? swapPicks(w, sh.i) : sess || sh.g == null ? knownExercises(new Set(sess ? w.exercises.map(e => e.key) : [])).filter(p => !disliked(p.name)) : [];
   picks = picks.slice(0, ex ? 8 : 16);
+  // Lifts from today's plan that got swapped or removed come first, as "Back to …", so a swap is never stuck.
+  const back = ex && plan ? [...new Map((plan.groups || []).flat().filter(x => !w.exercises.some(e => e.key === keyOf(x.name))).map(x => [keyOf(x.name), x.name])).values()] : [];
+  if (back.length) picks = [...back.map(n => ({ name: n, back: true })), ...picks.filter(p => !back.some(n => keyOf(n) === keyOf(p.name)))].slice(0, Math.max(8, back.length));
   const sample = ex ? (+(ex.sets.find(s => s.w !== '') || {}).w || 0) : 0;
   return `<div class="sh-grip"></div>
     <div class="sh-title">${title}${sess ? `<span>${sh.i == null ? 'Just for today, unless you save it below' : 'Swap it, or change today\'s sets and reps'}</span>` : ''}</div>
     ${picks.length ? `<label class="lbl">${sh.i == null ? 'Pick one you know' : 'Swap for (one tap)'}</label>
-      <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="${ex ? 'sx-swap' : 'sf-pick'}" data-n="${esc(p.name)}">${esc(p.name)}</button>`).join('')}</div>` : ''}
+      <div class="alt-row pick-row">${picks.map(p => `<button class="chip" data-a="${ex ? 'sx-swap' : 'sf-pick'}" data-n="${esc(p.name)}">${p.back ? `↩ Back to ${esc(p.name)}` : esc(p.name)}</button>`).join('')}</div>` : ''}
     ${ex ? formLink(ex.name) : ''}
     ${(ex || sh.g != null) && !NO_WEIGHT.test(ex ? ex.name : x.name) ? pinSeg(ex ? ex.name : x.name) : ''}
     ${ex || sh.g != null ? careSeg(ex ? ex.name : x.name) : ''}
@@ -6426,6 +6449,52 @@ setInterval(() => {
   if (liveLast) render();
   liveLast = sig;
 }, 60000);
+
+// ---------- drag to reorder (today) ----------
+// Hold the bar at the top of a lift you haven't started and drag it up or down. Only today's order
+// changes; your saved workout stays as it is (change that in More).
+document.addEventListener('pointerdown', ev => {
+  const h = ev.target.closest && ev.target.closest('.drag-h');
+  if (!h || S.drag) return;
+  const card = h.closest('section.card'), parent = card && card.parentNode, w = getW(h.dataset.drag);
+  if (!w || parent.querySelectorAll(':scope > section.card.dragable').length < 2) return;
+  ev.preventDefault();
+  S.drag = true;
+  const grab = ev.clientY - card.getBoundingClientRect().top;
+  let y = ev.clientY, raf = 0;
+  card.classList.add('dragging');
+  try { h.setPointerCapture(ev.pointerId); } catch (e) {}
+  const place = () => {
+    const others = [...parent.querySelectorAll(':scope > section.card.dragable')].filter(c => c !== card);
+    card.style.transform = '';
+    const mid = y - grab + card.offsetHeight / 2;
+    const before = others.find(o => { const r = o.getBoundingClientRect(); return mid < r.top + r.height / 2; });
+    if (before) { if (card.nextElementSibling !== before) parent.insertBefore(card, before); }
+    else if (others.length && others[others.length - 1].nextElementSibling !== card) others[others.length - 1].after(card);
+    card.style.transform = `translateY(${y - grab - card.getBoundingClientRect().top}px)`;
+  };
+  const tick = () => {
+    const edge = y < 90 ? -12 : y > innerHeight - 150 ? 12 : 0;
+    if (edge) { scrollBy(0, edge); place(); }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+  const move = e => { y = e.clientY; place(); };
+  const end = () => {
+    cancelAnimationFrame(raf);
+    h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', end); h.removeEventListener('pointercancel', end);
+    card.classList.remove('dragging'); card.style.transform = '';
+    S.drag = false;
+    const order = [...document.querySelectorAll('#view section.card[data-grp]')].map(c => c.dataset.grp);
+    const rank = e => { const k = order.indexOf(String(e.group)); return k < 0 ? 1e9 : k; };
+    const before = w.exercises.map(e => e.key).join('|');
+    w.exercises = w.exercises.map((e, k) => ({ e, k })).sort((a, b) => rank(a.e) - rank(b.e) || a.k - b.k).map(x => x.e);
+    const moved = w.exercises.map(e => e.key).join('|') !== before;
+    if (moved) { persist(w); toast('New order, just for today'); }
+    if (moved || S.dragRender) { S.dragRender = false; render(); }
+  };
+  h.addEventListener('pointermove', move); h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end);
+});
 
 // ---------- start ----------
 (async function start() {
