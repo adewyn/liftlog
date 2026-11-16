@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.26.3';
+const APP_VERSION = '2.26.4';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -372,7 +372,7 @@ function migrateV5(p) {
   if (mon) {
     const gs = mon.groups = mon.groups || [];
     gs.forEach(g => g.forEach(x => {
-      if (is(x, 'Bench press', 3, 4, 6)) { x.name = 'Low-incline bench press'; x.note = x.note || 'Bench at 15–30°'; }
+      if (is(x, 'Bench press', 3, 4, 6)) { x.name = 'Low-incline DB press'; x.note = x.note || 'Bench at 15–30°'; }
       if (is(x, 'Leg press', 2, 10, 10)) { x.sets = 3; x.max = 12; if (/feet high/i.test(x.note || '')) x.note = ''; }
     }));
     const lat = gs.findIndex(g => g.length === 1 && is(g[0], 'Lateral raise', 3, 12, 20));
@@ -431,7 +431,7 @@ function defaultProgram() {
     v: PROGRAM_V,
     days: {
       mon: { label: 'Heavy full body', type: 'strength', groups: [
-        [ex('Low-incline bench press', 3, 4, 6, UP, { note: 'Bench at 15–30°' })],
+        [ex('Low-incline DB press', 3, 4, 6, UP, { note: 'Bench at 15–30°' })],
         [ex('Hip thrust', 3, 6, 8, LO)],
         [ex('Wide-grip lat pulldown', 3, 6, 8, UP)],
         [ex('Cable fly', 2, 10, 12, UP)],
@@ -547,6 +547,19 @@ async function loadState() {
       if (/^leg press$/i.test(e.name) && (e.sets || []).some(x => x.done && +x.w === 170)) { e.name = 'Machine leg press'; e.key = keyOf(e.name); persist(w); }
     }));
     S.settings.legFix = 1; saveSettings();
+  }
+  // Nov 16 (your OK): Monday's low-incline press is dumbbells, so it's renamed and its logs show one
+  // dumbbell's weight like your other DB lifts (90 → 45, 100 → 50).
+  if (!S.settings.dbIncFix) {
+    const OLD = /^low-incline bench press$/i, NEW = 'Low-incline DB press';
+    const walk = o => { if (Array.isArray(o)) o.forEach(walk); else if (o && typeof o === 'object') { if (typeof o.name === 'string' && OLD.test(o.name)) o.name = NEW; Object.values(o).forEach(walk); } };
+    walk(S.program); saveProgram();
+    S.workouts.forEach(w => { let hit = false; (w.exercises || []).forEach(e => {
+      if (!OLD.test(e.name || '')) return;
+      e.name = NEW; e.key = keyOf(NEW); hit = true;
+      (e.sets || []).forEach(x => { if (x.w !== '' && +x.w > 0) x.w = round2(+x.w / 2); });
+    }); if (hit) persist(w); });
+    S.settings.dbIncFix = 1; saveSettings();
   }
   // The At home list is new (2.14): today's workout, already saved, gets its day's home lifts too.
   if (!S.settings.homeAdd) {
