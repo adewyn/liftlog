@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.27.1';
+const APP_VERSION = '2.28.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -2357,7 +2357,6 @@ function barChart(items, target) {
 
 // ---------- rendering ----------
 function render() {
-  if (S.drag) { S.dragRender = true; return; }
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === S.tab));
   let html;
   if (S.view) html = ({ workout: viewWorkout, exercise: viewExercise, progDay: viewProgDay, compare: viewCompare })[S.view.name]();
@@ -3179,7 +3178,7 @@ function sessionStrength(w) {
     // Today's lifts you haven't started can be dragged into a new order by the bar at the top.
     const drag = w.date === todayStr() && !homeG(g) && !g.items.some(i => w.exercises[i].sets.some(s => s.done));
     return `<section class="card ${multi ? 'ss' : ''} ${up ? 'up' : ''} ${drag ? 'dragable' : ''}" data-grp="${esc(String(g.id))}">
-      ${drag ? `<button class="drag-h" data-drag="${w.id}" aria-label="Hold and drag to reorder"><span></span></button>` : ''}
+      ${drag ? `<div class="drag-h" data-wid="${w.id}" aria-label="Hold to reorder"><span></span></div>` : ''}
       ${multi ? '<div class="ss-tag">Superset <span>· alternate, rest after the round</span></div>' : ''}
       ${inner}
     </section>`;
@@ -5836,6 +5835,7 @@ const ACT = {
     S.sheet.data = known && known.sets ? exData(classify({ ...known })) : { ...S.sheet.data, name: d.n };
     renderSheet();
   },
+  'ro-done': () => closeReorder(),
   'sx-addplan': d => { const w = getW(S.sheet.wid); closeSheet(); addPlanLift(w, d.n); render(); },
   'sx-swap': d => { ACT['sf-pick'](d); saveSessExercise(); },
   'habit-swap': d => {
@@ -6473,51 +6473,135 @@ setInterval(() => {
   liveLast = sig;
 }, 60000);
 
-// ---------- drag to reorder (today) ----------
-// Hold the bar at the top of a lift you haven't started and drag it up or down. Only today's order
-// changes; your saved workout stays as it is (change that in More).
-document.addEventListener('pointerdown', ev => {
-  const h = ev.target.closest && ev.target.closest('.drag-h');
-  if (!h || S.drag) return;
-  const card = h.closest('section.card'), parent = card && card.parentNode, w = getW(h.dataset.drag);
-  if (!w || parent.querySelectorAll(':scope > section.card.dragable').length < 2) return;
-  ev.preventDefault();
-  S.drag = true;
-  const grab = ev.clientY - card.getBoundingClientRect().top;
-  let y = ev.clientY, raf = 0;
-  card.classList.add('dragging');
-  try { h.setPointerCapture(ev.pointerId); } catch (e) {}
-  const place = () => {
-    const others = [...parent.querySelectorAll(':scope > section.card.dragable')].filter(c => c !== card);
-    card.style.transform = '';
-    const mid = y - grab + card.offsetHeight / 2;
-    const before = others.find(o => { const r = o.getBoundingClientRect(); return mid < r.top + r.height / 2; });
-    if (before) { if (card.nextElementSibling !== before) parent.insertBefore(card, before); }
-    else if (others.length && others[others.length - 1].nextElementSibling !== card) others[others.length - 1].after(card);
-    card.style.transform = `translateY(${y - grab - card.getBoundingClientRect().top}px)`;
-  };
+// ---------- reorder today (hold, then drag bars) ----------
+// Hold a lift's name (or the bar at the top of its card) and every lift shrinks into a short bar.
+// Keep your finger down and drag, or let go and drag any bar. Lifts you've started stay on top.
+// Only today's order changes; your saved workout stays as it is (change that in More).
+const RO = { w: null, drag: null, raf: 0 };
+function roGroups(w) {
+  const gs = [];
+  w.exercises.forEach(e => { let g = gs.find(x => x.id === e.group); if (!g) gs.push(g = { id: e.group, items: [] }); g.items.push(e); });
+  const gym = gs.filter(g => !g.items.some(isHome));
+  const started = g => g.items.some(e => e.sets.some(x => x.done));
+  return { fixed: gym.filter(started), mov: gym.filter(g => !started(g)), home: gs.filter(g => g.items.some(isHome)) };
+}
+function openReorder(w, grabId, y) {
+  closeReorder(true);
+  RO.w = w;
+  const { fixed, mov } = roGroups(w);
+  const bar = (g, cls) => `<div class="ro-bar ${cls}" data-grp="${esc(String(g.id))}">
+      <span class="ro-grip">${cls === 'mov' ? '<i></i><i></i><i></i>' : ic('check')}</span>
+      <b>${esc(g.items.map(e => e.name).join(' + '))}</b>
+      <small>${g.items.length > 1 ? 'Superset' : esc(targetText(g.items[0].target, g.items[0]))}</small></div>`;
+  const el = document.createElement('div');
+  el.id = 'reorder'; el.className = 'ro';
+  el.innerHTML = `<div class="ro-panel">
+      <div class="ro-head"><b>Reorder today</b><span>Drag a bar up or down. Lifts you've started stay on top.</span></div>
+      <div class="ro-list">${fixed.map(g => bar(g, 'fixed')).join('')}${mov.map(g => bar(g, 'mov')).join('')}</div>
+      <button class="btn pri block big" data-a="ro-done">Done</button></div>`;
+  document.body.appendChild(el);
+  document.body.classList.add('ro-open');
+  el.addEventListener('click', ev => { if (ev.target === el) closeReorder(); });
+  const grab = grabId != null && el.querySelector(`.ro-bar.mov[data-grp="${CSS.escape(String(grabId))}"]`);
+  if (grab && y != null) {
+    // Put the held lift right under your finger so the drag feels continuous.
+    const list = el.querySelector('.ro-list'), r = grab.getBoundingClientRect();
+    list.scrollTop += r.top + r.height / 2 - y;
+    roStart(grab, y);
+  }
+}
+function closeReorder(quiet) {
+  const el = document.getElementById('reorder');
+  cancelAnimationFrame(RO.raf); RO.drag = null;
+  if (!el) return;
+  el.remove(); document.body.classList.remove('ro-open');
+  if (!quiet) render();
+}
+function roStart(bar, y) {
+  const list = bar.parentNode, bars = [...list.querySelectorAll('.ro-bar.mov')];
+  if (bars.length < 2) return;
+  const H = bars[1].offsetTop - bars[0].offsetTop;
+  RO.drag = { bar, list, bars, idx: bars.indexOf(bar), to: bars.indexOf(bar), y0: y, y, s0: list.scrollTop, H };
+  bar.classList.add('lift');
   const tick = () => {
-    const edge = y < 90 ? -12 : y > innerHeight - 150 ? 12 : 0;
-    if (edge) { scrollBy(0, edge); place(); }
-    raf = requestAnimationFrame(tick);
+    const d = RO.drag;
+    if (!d) return;
+    const r = d.list.getBoundingClientRect(), edge = d.y < r.top + 50 ? -8 : d.y > r.bottom - 50 ? 8 : 0;
+    if (edge) { d.list.scrollTop += edge; roMove(d.y); }
+    RO.raf = requestAnimationFrame(tick);
   };
-  raf = requestAnimationFrame(tick);
-  const move = e => { y = e.clientY; place(); };
-  const end = () => {
-    cancelAnimationFrame(raf);
-    h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', end); h.removeEventListener('pointercancel', end);
-    card.classList.remove('dragging'); card.style.transform = '';
-    S.drag = false;
-    const order = [...document.querySelectorAll('#view section.card[data-grp]')].map(c => c.dataset.grp);
-    const rank = e => { const k = order.indexOf(String(e.group)); return k < 0 ? 1e9 : k; };
-    const before = w.exercises.map(e => e.key).join('|');
-    w.exercises = w.exercises.map((e, k) => ({ e, k })).sort((a, b) => rank(a.e) - rank(b.e) || a.k - b.k).map(x => x.e);
-    const moved = w.exercises.map(e => e.key).join('|') !== before;
-    if (moved) { persist(w); toast('New order, just for today'); }
-    if (moved || S.dragRender) { S.dragRender = false; render(); }
+  RO.raf = requestAnimationFrame(tick);
+}
+function roMove(y) {
+  const d = RO.drag;
+  if (!d) return;
+  d.y = y;
+  const n = d.bars.length, lo = -d.idx * d.H, hi = (n - 1 - d.idx) * d.H;
+  const dy = Math.max(lo - d.H / 2, Math.min(hi + d.H / 2, y - d.y0 + d.list.scrollTop - d.s0));
+  d.bar.style.transform = `translateY(${dy}px) scale(1.03)`;
+  d.to = Math.max(0, Math.min(n - 1, d.idx + Math.round(dy / d.H)));
+  d.bars.forEach((b, k) => {
+    if (b === d.bar) return;
+    const sh = k > d.idx && k <= d.to ? -d.H : k < d.idx && k >= d.to ? d.H : 0;
+    b.style.transform = sh ? `translateY(${sh}px)` : '';
+  });
+}
+function roEnd() {
+  const d = RO.drag;
+  if (!d) return;
+  cancelAnimationFrame(RO.raf); RO.drag = null;
+  const order = d.bars.slice();
+  order.splice(d.to, 0, ...order.splice(d.idx, 1));
+  // Settle the bars in their new spots without a jump.
+  d.list.classList.add('ro-still');
+  order.forEach(b => { b.style.transform = ''; d.list.appendChild(b); });
+  d.bar.classList.remove('lift');
+  requestAnimationFrame(() => d.list.classList.remove('ro-still'));
+  if (d.to === d.idx) return;
+  const w = RO.w, { fixed, home } = roGroups(w);
+  const ids = [...fixed.map(g => String(g.id)), ...order.map(b => b.dataset.grp), ...home.map(g => String(g.id))];
+  const rank = e => { const k = ids.indexOf(String(e.group)); return k < 0 ? 1e9 : k; };
+  w.exercises = w.exercises.map((e, k) => ({ e, k })).sort((a, b) => rank(a.e) - rank(b.e) || a.k - b.k).map(x => x.e);
+  persist(w);
+}
+// Touch: hold ~0.4 s without moving to open; keep the finger down to drag right away.
+(function reorderGestures() {
+  let hold = null;
+  const yOf = ev => (ev.touches ? (ev.touches[0] || ev.changedTouches[0]) : ev).clientY;
+  const xOf = ev => (ev.touches ? (ev.touches[0] || ev.changedTouches[0]) : ev).clientX;
+  const down = ev => {
+    if (ev.touches && ev.touches.length > 1) return;
+    const bar = ev.target.closest && ev.target.closest('#reorder .ro-bar.mov');
+    if (bar) { ev.preventDefault(); roStart(bar, yOf(ev)); return; }
+    const spot = ev.target.closest && ev.target.closest('section.card.dragable .ex-head, section.card.dragable .drag-h');
+    if (!spot || ev.target.closest('.ex-btns')) return;
+    const card = spot.closest('section.card'), w = getW((card.querySelector('[data-wid]') || {}).dataset?.wid);
+    if (!w) return;
+    hold = { x: xOf(ev), y: yOf(ev), t: setTimeout(() => {
+      const gid = card.dataset.grp, y = hold ? hold.y : null;
+      hold = null;
+      if (roGroups(w).mov.length < 2) { toast('Nothing else to move yet'); return; }
+      openReorder(w, gid, y);
+    }, 420) };
   };
-  h.addEventListener('pointermove', move); h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end);
-});
+  const move = ev => {
+    if (RO.drag) { ev.preventDefault(); roMove(yOf(ev)); return; }
+    if (hold) { hold.y = yOf(ev); if (Math.abs(xOf(ev) - hold.x) > 10 || Math.abs(yOf(ev) - hold.y0) > 10) { clearTimeout(hold.t); hold = null; } }
+  };
+  const up = ev => {
+    if (hold) { clearTimeout(hold.t); hold = null; }
+    if (RO.drag) { if (ev.cancelable) ev.preventDefault(); roEnd(); }
+  };
+  document.addEventListener('touchstart', ev => { down(ev); if (hold) hold.y0 = hold.y; }, { passive: false });
+  document.addEventListener('touchmove', move, { passive: false });
+  document.addEventListener('touchend', up, { passive: false });
+  document.addEventListener('touchcancel', up, { passive: false });
+  document.addEventListener('mousedown', ev => { if (ev.button === 0) { down(ev); if (hold) hold.y0 = hold.y; } });
+  document.addEventListener('mousemove', ev => { if (RO.drag || hold) move(ev); });
+  document.addEventListener('mouseup', up);
+  // No text-selection menu or callout while holding.
+  document.addEventListener('contextmenu', ev => { if (ev.target.closest && ev.target.closest('section.card.dragable .ex-head, #reorder')) ev.preventDefault(); });
+})();
 
 // ---------- start ----------
 (async function start() {
