@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.28.0';
+const APP_VERSION = '2.28.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -6572,7 +6572,7 @@ function roEnd() {
   const down = ev => {
     if (ev.touches && ev.touches.length > 1) return;
     const bar = ev.target.closest && ev.target.closest('#reorder .ro-bar.mov');
-    if (bar) { ev.preventDefault(); roStart(bar, yOf(ev)); return; }
+    if (bar) { if (!ev.touches) ev.preventDefault(); roStart(bar, yOf(ev)); return; }
     const spot = ev.target.closest && ev.target.closest('section.card.dragable .ex-head, section.card.dragable .drag-h');
     if (!spot || ev.target.closest('.ex-btns')) return;
     const card = spot.closest('section.card'), w = getW((card.querySelector('[data-wid]') || {}).dataset?.wid);
@@ -6590,17 +6590,48 @@ function roEnd() {
   };
   const up = ev => {
     if (hold) { clearTimeout(hold.t); hold = null; }
-    if (RO.drag) { if (ev.cancelable) ev.preventDefault(); roEnd(); }
+    if (RO.drag) roEnd();
   };
-  document.addEventListener('touchstart', ev => { down(ev); if (hold) hold.y0 = hold.y; }, { passive: false });
+  // Only touchmove needs to block scrolling (while a bar is held); the rest stay passive so taps,
+  // scrolling, and the keyboard behave normally everywhere else.
+  document.addEventListener('touchstart', ev => { down(ev); if (hold) hold.y0 = hold.y; }, { passive: true });
   document.addEventListener('touchmove', move, { passive: false });
-  document.addEventListener('touchend', up, { passive: false });
-  document.addEventListener('touchcancel', up, { passive: false });
+  document.addEventListener('touchend', up, { passive: true });
+  document.addEventListener('touchcancel', up, { passive: true });
   document.addEventListener('mousedown', ev => { if (ev.button === 0) { down(ev); if (hold) hold.y0 = hold.y; } });
   document.addEventListener('mousemove', ev => { if (RO.drag || hold) move(ev); });
   document.addEventListener('mouseup', up);
   // No text-selection menu or callout while holding.
   document.addEventListener('contextmenu', ev => { if (ev.target.closest && ev.target.closest('section.card.dragable .ex-head, #reorder')) ev.preventDefault(); });
+})();
+
+// iPhone: after typing in a sheet (a set's weight or reps), closing the keyboard can leave the screen
+// shifted up, so the sheet hangs off the top. Nudge the page once the keyboard is gone.
+(function keyboardFix() {
+  const vv = window.visualViewport;
+  const typingNow = () => { const a = document.activeElement; return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); };
+  const reset = () => {
+    if (typingNow()) return;
+    if (vv && vv.offsetTop < 1 && window.scrollY >= 0) return;
+    const y = window.scrollY;
+    window.scrollTo(0, y + 1); window.scrollTo(0, y);
+  };
+  // While the keyboard is up, the sheet fits the part of the screen you can see, so nothing hides
+  // behind the keyboard or above the top.
+  const fit = () => {
+    const sh = document.getElementById('sheet');
+    if (!sh || !vv) return;
+    const kb = window.innerHeight - vv.height > 80;
+    sh.style.top = kb ? `${vv.offsetTop}px` : '';
+    sh.style.height = kb ? `${vv.height}px` : '';
+    sh.style.bottom = kb ? 'auto' : '';
+    document.documentElement.style.setProperty('--vvh', kb ? `${vv.height}px` : '100vh');
+  };
+  document.addEventListener('focusout', () => setTimeout(() => { fit(); reset(); }, 80));
+  if (vv) {
+    vv.addEventListener('resize', () => { fit(); setTimeout(reset, 80); });
+    vv.addEventListener('scroll', () => { fit(); if (!typingNow()) setTimeout(reset, 80); });
+  }
 })();
 
 // ---------- start ----------
