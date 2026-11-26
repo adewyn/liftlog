@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.28.1';
+const APP_VERSION = '2.29.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -2900,6 +2900,15 @@ function recommendCardio(date, dayKey) {
   const runs = cardioHistory('run', date).filter(r => r.date >= addDays(date, -42));
   const walks = cardioHistory('walk', date);
   const talk = 'Easy enough to chat.';
+  // Your trainer paused runs (an injury, a new tattoo): their plan wins through its end date.
+  const hold = S.settings.cardioHold;
+  if (hold && date >= hold.from && date <= hold.until) return { type: 'walk', skip: hold.type !== 'walk', text: hold.text, why: hold.why || 'From your trainer.' };
+  // Pain in an ankle, knee, shin, or foot in the last week's notes, any workout: no run until a week passes without one.
+  const hurt = notedSince(date, 6, ['pain-part']).find(x => RUN_PARTS.test(x.word));
+  if (hurt) {
+    const when = hurt.date === date ? 'today' : fmtDate(hurt.date, { weekday: 'long' });
+    return { type: 'walk', skip: true, text: `No run today. Rest your ${hurt.word.toLowerCase()}`, why: `You noted ${hurt.word.toLowerCase()} pain ${hurt.date === date ? 'today' : `on ${when}`}. Yoga is fine, or an easy walk only if it doesn't hurt. Runs come back once a week goes by with no pain notes.` };
+  }
   const sick = !energy && sickNoted(date);
   if (energy === 'low' || sick) {
     const m = walks.length ? Math.round(sum(walks.slice(0, 5).map(x => x.min)) / Math.min(5, walks.length)) : 20;
@@ -3340,7 +3349,7 @@ function cardioPlan(w, recC) {
     ${hasYoga ? '' : `<div class="alt-row"><span>Or:</span>${recY.others.map(c => `<button class="chip" data-a="add-yoga" data-wid="${w.id}" data-id="${c.id}">${c.name} ${c.len}</button>`).join('')}</div>`}
     <div class="plan-item ${hasMove ? 'done' : ''}">
       <div><b>${esc(recC.text)}</b>${hasMove ? '' : `<small>${esc(recC.why)}</small>`}</div>
-      ${hasMove ? ic('check') : `<button class="btn pri" data-a="add-act" data-wid="${w.id}" data-t="${recC.type}"${recC.intervals ? ' data-style="intervals"' : ''}>Log it</button>`}
+      ${hasMove ? ic('check') : recC.skip ? '' : `<button class="btn pri" data-a="add-act" data-wid="${w.id}" data-t="${recC.type}"${recC.intervals ? ' data-style="intervals"' : ''}>Log it</button>`}
     </div>
     ${rd && rd.ready ? `<div class="coach coach-up" style="margin-top:12px"><span>▲ Your beginner classes have felt easy for a while. You might be ready for intermediate.</span><button data-a="yoga-level" data-v="intermediate">Switch</button></div>` : ''}
     ${hasYoga && hasMove ? '' : '<div class="sh-hint">Tap "Log it" after you finish.</div>'}
@@ -4820,10 +4829,22 @@ function applyCoachPlan(plan) {
     const t2 = coachOp(prog, c);
     return t2 && { t: t2, why: String((c && c.why) || '').trim().slice(0, 200) };
   }).filter(Boolean);
+  // Cardio days (an injury, a new tattoo): the trainer can pause runs through a date, or clear a pause.
+  const prevHold = S.settings.cardioHold || null;
+  const ch = plan.cardio && typeof plan.cardio === 'object' ? plan.cardio : null;
+  if (ch && ch.clear) {
+    if (prevHold) { delete S.settings.cardioHold; saveSettings(); lines.push({ t: 'Cardio days: runs are back on', why: String(ch.why || '').trim().slice(0, 200) }); }
+  } else if (ch && /^\d{4}-\d{2}-\d{2}$/.test(ch.until || '') && ch.until >= todayStr() && String(ch.text || '').trim()) {
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(ch.from || '') ? ch.from : todayStr();
+    S.settings.cardioHold = { id: t.lastId, from, until: ch.until, type: ch.type === 'walk' ? 'walk' : 'rest',
+      text: String(ch.text).trim().slice(0, 120), why: String(ch.why || '').trim().slice(0, 300) };
+    saveSettings();
+    lines.push({ t: `Cardio days through ${fmtDate(ch.until, { weekday: 'short', month: 'short', day: 'numeric' })}: ${S.settings.cardioHold.text}`, why: S.settings.cardioHold.why });
+  }
   if (!note && !lines.length) { if ((outlook || look) && !S.sheet && !typing()) render(); return; }
   const entry = { id: t.lastId, date: todayStr(), note, lines, seen: false, undone: false };
   if (lines.length) {
-    DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program } }).catch(() => {});
+    DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program, hold: prevHold } }).catch(() => {});
     S.program = prog;
     saveProgram();
   }
@@ -6290,6 +6311,7 @@ const ACT = {
     const u = (await DB.all('kv')).find(r => r.k === 'coachUndo');
     if (!c || !u || !u.v || u.v.id !== c.id) { toast("Can't undo that one anymore. Change anything in More → Program."); return; }
     S.program = u.v.program; await saveProgram();
+    if ('hold' in u.v) { if (u.v.hold) S.settings.cardioHold = u.v.hold; else delete S.settings.cardioHold; saveSettings(); }
     c.undone = true; c.seen = true; saveCoachLog();
     render(); toast('Put your program back the way it was.');
   },
