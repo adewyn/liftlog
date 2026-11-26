@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.29.0';
+const APP_VERSION = '2.30.0';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -943,6 +943,11 @@ function effTarget(e) {
   if (isPin(e)) t = { ...t, inc: 1, stack: true };
   return t;
 }
+// Your trainer can hold a lift's weight (sore knees, an injury) through a date: no jumps until then.
+function liftHold(name, date) {
+  const k = keyOf(name);
+  return (S.settings.liftHolds || []).find(h => keyOf(h.name) === k && date >= h.from && date <= h.until) || null;
+}
 function fillSets(e, w) {
   const rehab = REHAB_WORDS.test(e.name), care = careOf(e.name);
   const base = targetOf(e), t = effTarget(e);
@@ -954,8 +959,9 @@ function fillSets(e, w) {
   const tired = sleepShort(w.date) ? 'you slept under 6 hours' : t.body === 'lower' ? legsTired(w.date) : '';
   const short2 = !rehab && energyFor(w.date) !== 'low' && twoShortNights(w.date) ? "you've had two short nights" : '';
   const helps = soreHelpers(e.name, w.date);
+  const held = liftHold(e.name, w.date);
   // Every reason to hold off weight jumps today, in one place, so plans and comebacks treat them the same.
-  const noJump = rehab ? '' : tired || short2 || (deload ? "it's a deload week" : '') || (helps ? `your ${helps} ${/s$| and /.test(helps) ? 'are' : 'is'} sore` : '');
+  const noJump = rehab ? '' : (held ? held.why : '') || tired || short2 || (deload ? "it's a deload week" : '') || (helps ? `your ${helps} ${/s$| and /.test(helps) ? 'are' : 'is'} sore` : '');
   // Never reach back past a break for the last normal session: build on the easy one instead (it isn't a miss).
   const stale = real.length && recent.length && daysBetween(real[0].date, recent[0].date) >= 21;
   const basis = real.length && !stale ? real.slice(0, 2) : recent.slice(0, 2), noted = basis[0] && basis[0].note;
@@ -4841,10 +4847,27 @@ function applyCoachPlan(plan) {
     saveSettings();
     lines.push({ t: `Cardio days through ${fmtDate(ch.until, { weekday: 'short', month: 'short', day: 'numeric' })}: ${S.settings.cardioHold.text}`, why: S.settings.cardioHold.why });
   }
+  // Weight holds: no jumps on these lifts through a date (sore joints, an injury). Same lift replaces; {clear: true} ends them all.
+  const prevLiftHolds = S.settings.liftHolds || [];
+  const hs = Array.isArray(plan.holds) ? plan.holds.slice(0, 12) : plan.holds && plan.holds.clear ? 'clear' : null;
+  if (hs === 'clear') {
+    if (prevLiftHolds.length) { S.settings.liftHolds = []; saveSettings(); lines.push({ t: 'Weight holds lifted: jumps are back on', why: String(plan.holds.why || '').trim().slice(0, 200) }); }
+  } else if (hs) {
+    const fmtD = d => fmtDate(d, { weekday: 'short', month: 'short', day: 'numeric' });
+    let next = prevLiftHolds.filter(h => h.until >= todayStr());
+    hs.forEach(h => {
+      const name = String((h && h.name) || '').trim().slice(0, 50);
+      if (!name || !/^\d{4}-\d{2}-\d{2}$/.test(h.until || '') || h.until < todayStr()) return;
+      const why = String(h.why || '').trim().slice(0, 80) || 'your trainer is holding it for now';
+      next = next.filter(x => keyOf(x.name) !== keyOf(name)).concat({ name, from: todayStr(), until: h.until, why });
+      lines.push({ t: `${name}: same weight through ${fmtD(h.until)}, no jumps`, why: cap(why) + '.' });
+    });
+    S.settings.liftHolds = next; saveSettings();
+  }
   if (!note && !lines.length) { if ((outlook || look) && !S.sheet && !typing()) render(); return; }
   const entry = { id: t.lastId, date: todayStr(), note, lines, seen: false, undone: false };
   if (lines.length) {
-    DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program, hold: prevHold } }).catch(() => {});
+    DB.put('kv', { k: 'coachUndo', v: { id: entry.id, program: S.program, hold: prevHold, liftHolds: prevLiftHolds } }).catch(() => {});
     S.program = prog;
     saveProgram();
   }
@@ -6312,6 +6335,7 @@ const ACT = {
     if (!c || !u || !u.v || u.v.id !== c.id) { toast("Can't undo that one anymore. Change anything in More → Program."); return; }
     S.program = u.v.program; await saveProgram();
     if ('hold' in u.v) { if (u.v.hold) S.settings.cardioHold = u.v.hold; else delete S.settings.cardioHold; saveSettings(); }
+    if ('liftHolds' in u.v) { S.settings.liftHolds = u.v.liftHolds || []; saveSettings(); }
     c.undone = true; c.seen = true; saveCoachLog();
     render(); toast('Put your program back the way it was.');
   },
