@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.30.0';
+const APP_VERSION = '2.30.1';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -28,7 +28,7 @@ const $ = sel => document.querySelector(sel);
 const uid = p => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 // A renamed lift keeps its history: the new name looks up the old one's sessions.
 // Your old "Leg press" logs were the plate-loaded sled, so that one keeps the history. The machine gets its own.
-const KEY_ALIAS = { 'chest press': 'chest press or dips', 'wide-grip lat pulldown': 'lat pulldown', 'plate-loaded leg press': 'leg press' };
+const KEY_ALIAS = { 'chest press': 'chest press or dips', 'wide-grip lat pulldown': 'lat pulldown', 'plate-loaded leg press': 'leg press', 'standing db shoulder press': 'seated db shoulder press' };
 // Close cousins: every 6-week block, a smaller lift moves to the next one in its family (see rotateBlock).
 // Big lifts stay put so they can keep climbing. Names here are ones the muscle map knows.
 const VARIANTS = [
@@ -59,6 +59,7 @@ const isHome = e => !!e && e.place === 'home';
 // 10–12 after. Small lifts (raises, rear delts, calves, abs, the mace) are 10–12 any day. Bodyweight
 // moves, carries, and max-rep sets keep their own counts.
 const REP_CAP = 12;
+const CORE_WORDS = /pallof|woodchop|dead ?bug|bird ?dog|flutter|hollow|russian twist|plank/i;
 const SMALL_LIFT = /raise|rear delt|reverse (pec|fly)|face pull|calf|crunch|pallof|sit-?up|\babs?\b|mace|abduct|cuban|external rot|pull-?apart/i;
 const DAY_REPS = { mon: [6, 8], wed: [8, 10], fri: [10, 12] }, ISO_REPS = { mon: [8, 10], wed: [10, 12], fri: [10, 12] };
 const capExempt = x => x.unit === 'steps' || x.min == null || NO_WEIGHT.test(x.name);
@@ -797,23 +798,37 @@ function coachPlan(t, recent, opts = {}) {
   if (new Set(lw).size > 1) {
     const ws = [], rr = [];
     let earned = 0;
+    // A big step (over 10%) on a lift at the rep cap moves one set at a time: another set only follows
+    // once every set already at the heavier weight reaches the bottom of the range.
+    const bridge = nw => jumpFor(t, nw) / nw > 0.1 && hi + 2 > REP_CAP;
+    const heavyOk = nw => last.sets.filter(s => +s.w >= nw).every(s => +s.r >= lo);
+    let bridged = 0;
     for (let k = 0; k < t.sets; k++) {
-      const w = prev[k], r = reps[k];
+      const w = prev[k], r = reps[k], nw = w ? round2(w + jumpFor(t, w)) : 0, big = !!w && bridge(w);
       if (r != null && r >= hi && w) earned++;
-      if (r != null && r >= hi && w && !holdWhy) { ws.push(round2(w + jumpFor(t, w))); rr.push(lo); } else {
-        ws.push(w); rr.push(r == null ? lo : Math.min(hi, r >= lo ? r + 1 : lo));
+      if (r != null && r >= hi && w && !holdWhy && (!big || (heavyOk(nw) && !bridged))) { if (big) bridged++; ws.push(nw); rr.push(lo); } else {
+        ws.push(w); rr.push(r == null ? lo : Math.min(hi, r >= lo ? r + 1 : last.grace ? r + 1 : lo));
       }
     }
+    const g = last.grace && last.sets.some(x => +x.r < lo) ? { grace: last.grace - 1 } : {};
     const ups = ws.filter((w, k) => w > prev[k]).length;
-    if (ups) return plan('up', ws, rr, `${ups === 1 ? 'One set' : `${ups} sets`} hit ${hi}, so ${ups === 1 ? 'it goes' : 'they go'} up. The rest chase one more rep.`);
-    if (earned) return plan('hold', ws, rr, `You earned a jump, but ${holdWhy}. Same weights today.`);
-    return plan('reps', ws, rr, `Same weights as last time. One more rep each (top is ${hi}).`);
+    if (ups) return { ...plan('up', ws, rr, `${ups === 1 ? 'One set' : `${ups} sets`} hit ${hi}, so ${ups === 1 ? 'it goes' : 'they go'} up. The rest chase one more rep.`), ...g };
+    if (earned && holdWhy) return plan('hold', ws, rr, `You earned a jump, but ${holdWhy}. Same weights today.`);
+    if (earned) return { ...plan('reps', ws, rr, `Your heavier set${ws.filter(x => x === Math.max(...ws)).length > 1 ? 's' : ''} at ${Math.max(...ws)} lb chase${ws.filter(x => x === Math.max(...ws)).length > 1 ? '' : 's'} ${lo} first, then another set moves up.`), ...g };
+    return { ...plan('reps', ws, rr, `Same weights as last time. One more rep each (top is ${hi}).`), ...g };
   }
 
   if (last.sets.length >= t.sets && reps.every(r => r >= hi)) {
     if (!top) return plan('reps', prev, reps.map(r => r + 1), `${hi} on every set. Add a little weight or slow it down.`);
     if (holdWhy) return plan('hold', prev, reps, `You earned ${round2(top + jumpFor(t, top))} lb, but ${holdWhy}. Stay at ${top} today, it'll keep.`);
     // A step bigger than 10% (20 → 25 lb dumbbells) has to be earned with 2 extra reps first.
+    if (jumpFor(t, top) / top > 0.1 && hi + 2 > REP_CAP) {
+      // 12 reps is your cap, so "earn it with 2 more reps" can't work here: one set moves up first.
+      const nw = round2(top + jumpFor(t, top));
+      const aim = Math.max(4, Math.min(lo, Math.round((e1rm(top, Math.min(Math.min(...reps), 20)) / nw - 1) * 30)));
+      if (holdWhy) return plan('hold', prev, reps, `You earned a try at ${nw} lb, but ${holdWhy}. Stay at ${top} today, it'll keep.`);
+      return { ...plan('up', [nw, ...fill(top).slice(1)], [aim, ...fill(hi).slice(1)], `${hi} on every set. ${nw} lb is a big step and ${REP_CAP} reps is your cap, so one set at ${nw} first: aim for ${aim}+ clean reps, then ${top} lb for the rest.`), grace: 3 };
+    }
     if (jumpFor(t, top) / top > 0.1 && !reps.every(r => r >= hi + 2)) {
       return plan('reps', prev, fill(hi + 2), `${round2(top + jumpFor(t, top))} lb is a big step, so earn it: ${hi + 2} on every set first.`);
     }
@@ -856,7 +871,7 @@ function coachPlan(t, recent, opts = {}) {
   const p2 = recent[1];
   // You always push hard, so a set with no effort answer counts as all-out.
   if ((last.sets[last.sets.length - 1].rir || 0) === 0 && last.sets.some(x => +x.r < hi) && p2 && Math.max(...p2.sets.map(s => +s.w || 0)) === top && total(last) < total(p2)) {
-    return plan('hold', prev, reps, `Last set was all-out and reps dipped. Match ${wTxt(top)} before adding reps.`);
+    return plan('hold', prev, reps, `Last set was all-out and reps dipped. Match ${top ? wTxt(top) : `last time's ${reps.join(', ')}`} before adding reps.`);
   }
   if (quickAndStrong(last)) {
     return plan('reps', prev, Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 2))), `Only ${restTxt(last)} and your reps held, so two more reps a set (top is ${hi}).`);
@@ -906,7 +921,7 @@ function sessionExercise(x, group, w) {
 // so low-energy days and deloads never drag the numbers down.
 // A lift you've never logged starts from a close cousin you have: low-incline bench at about 85% of
 // your flat bench (a little less if that bench was a while ago).
-const FIRST_FROM = [[/incline (bench|barbell)/i, 'Bench press', 0.85]];
+const FIRST_FROM = [[/incline (bench|barbell)/i, 'Bench press', 0.85], [/^(db|dumbbell) (romanian deadlift|rdl)$/i, 'Romanian deadlift', 0.37, 'each hand, about 75% of your barbell Romanian deadlift in total']];
 function firstFrom(e, t, w) {
   if (isPin(e)) return null;
   const f = FIRST_FROM.find(([re]) => re.test(e.name)) || familyStart(e, w);
@@ -916,7 +931,7 @@ function firstFrom(e, t, w) {
   if (!best) return null;
   const step = t.inc || UP, aim = Math.max(t.min, (t.max ?? t.min) - 1), pct = f[2] * (daysBetween(h.date, w.date) >= 21 ? 0.9 : 1);
   const wNew = Math.max(step, Math.floor(best * pct / (1 + aim / 30) / step) * step), fill = v => Array(t.sets).fill(v);
-  return { kind: 'hold', ws: fill(wNew), w: wNew, from: 0, prev: null, reps: fill(aim), note: `First time: ${wNew} lb for ${aim}, about ${Math.round(f[2] * 100)}% of your ${f[1].toLowerCase()}. Adjust after the first set if it's off.` };
+  return { kind: 'hold', ws: fill(wNew), w: wNew, from: 0, prev: null, reps: fill(aim), note: `First time: ${wNew} lb for ${aim}, ${f[3] || `about ${Math.round(f[2] * 100)}% of your ${f[1].toLowerCase()}`}. Adjust after the first set if it's off.` };
 }
 // A new cousin in a lift's family (a new block's curl, say) starts at about 90% of the cousin you've
 // done most recently in the last 3 months.
@@ -967,7 +982,8 @@ function fillSets(e, w) {
   const basis = real.length && !stale ? real.slice(0, 2) : recent.slice(0, 2), noted = basis[0] && basis[0].note;
   let plan = coachPlan(t, basis, { energy: rehab ? null : energyFor(w.date) || (sickNoted(w.date) ? 'low' : null), sick: !rehab && !energyFor(w.date) && !!sickNoted(w.date), tired: noJump, noted: noted && noted.k });
   if (pick.conv) plan = pick.conv;
-  let cb = rehab ? null : comeback(t, recent, w.date);
+  const cramped = !rehab && (care === 'cramp' || (noted && noted.k === 'lift-cramp'));
+  let cb = rehab || cramped ? null : comeback(t, recent, w.date);
   // Building back after a break waits a session when today's an easy day or your note said hard or pain.
   const pause = cb && cb.kind === 'up' && (low ? 'today is an easy day' : noJump || [noted, recent[0] && recent[0].note].some(x => x && (x.k === 'lift-hard' || x.k === 'lift-pain')) ? 'your note said it was rough' : '');
   if (pause) cb = { ...cb, kind: 'hold', ws: cb.ws.map(() => cb.from), note: `Same ${cb.from} lb, since ${pause}. Building back picks up next time.` };
@@ -978,6 +994,21 @@ function fillSets(e, w) {
     const st = isPin(e) ? 1 : t.inc || UP, lite = x => (+x > 0 ? Math.max(st, Math.floor((+x * 0.9) / st) * st) : x);
     const ws = plan.ws.map(lite);
     plan = { ...plan, kind: 'hold', ws, w: Math.max(...ws.map(x => +x || 0)), note: '' };
+  }
+  // Cramped last time: start where you finished (if you dropped the weight mid-way) or a step lighter,
+  // so the "lighter and slower" reminder matches the numbers.
+  const cn = noted && noted.k === 'lift-cramp', bl = basis[0] && basis[0].sets;
+  if (cramped && plan && plan.ws && bl && bl.length && !deload) {
+    const step = t.inc || UP, lo = t.min ?? t.max ?? 8, hi = t.max ?? t.min ?? 12;
+    const topW = Math.max(...bl.map(s => +s.w || 0)), end = bl[bl.length - 1], endW = +end.w || 0;
+    if (endW && endW < topW * 0.9) {
+      const up = +end.r >= hi && !noJump && !cn, nw = up ? round2(endW + jumpFor(t, endW)) : endW;
+      const r = up ? lo : Math.min(hi, Math.max(lo, (+end.r || lo) + 1));
+      plan = { ...plan, kind: nw < topW ? 'down' : 'hold', ws: plan.ws.map(() => nw), w: nw, reps: plan.ws.map(() => r), note: `${nw} lb on every set, where you finished last time${cn ? ' after the cramps' : ''}. Go for ${r}.` };
+    } else if (cn && topW > step) {
+      const nw = Math.max(step, round2(topW - step));
+      plan = { ...plan, kind: 'down', ws: plan.ws.map(() => nw), w: nw, reps: plan.ws.map(() => lo), note: `${nw} lb, a step under last time, since it cramped. Go for ${lo}+.` };
+    }
   }
   if (plan && (care || rehab)) {
     const last = (real[0] || recent[0]).sets, top = Math.max(...last.map(s => +s.w || 0)), step = t.inc || UP;
@@ -1004,7 +1035,7 @@ function fillSets(e, w) {
   if (extra && (!plan || deload)) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${extra}`.trim() } : { kind: 'hold', note: extra, from: 0, w: 0, prev: null };
   const noteCue = !noted ? '' : noted.k === 'lift-pain' ? 'Keep it light, stop if it hurts.'
     : noted.k === 'lift-cramp' && care !== 'cramp' ? CARE_CUES.cramp : '';
-  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care] : '', noteCue, helps ? `Sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here. Go lighter, stop if it pulls.` : ''].filter(Boolean).join(' ');
+  const cue = [rehab ? REHAB_CUE : care ? CARE_CUES[care].replace('8 to 12', `${t.min ?? 8} to ${t.max ?? 12}`) : '', noteCue, helps ? `Sore ${helps} ${/^(chest|back)$/.test(helps) ? 'helps' : 'help'} here. Go lighter, stop if it pulls.` : ''].filter(Boolean).join(' ');
   if (cue) e.coach = e.coach ? { ...e.coach, note: `${e.coach.note} ${cue}`.trim() } : { kind: 'hold', note: cue, from: 0, w: 0, prev: null };
   const n = sets;
   // Sets you've logged or typed in yourself stay exactly as they are; only the rest get re-planned.
@@ -1075,6 +1106,8 @@ function comeback(t, recent, date) {
   // Already back for a session or few: find where the break was and the weight from before it, in today's range.
   const k = recent.findIndex((p, i) => i < 4 && recent[i + 1] && daysBetween(recent[i + 1].date, p.date) >= 21);
   if (k < 0 || !top) return null;
+  // You dropped the weight partway through last time (140, then 95 and 110): that's not the level to build from.
+  if (+last.sets[last.sets.length - 1].w < top * 0.9) return null;
   const oldTop = atReps(recent[k + 1]);
   if (top >= oldTop || last.sets.length < 2 || last.sets.some(s => +s.r < lo)) return null;
   const w = Math.min(oldTop, round2(top + jumpFor(t, top)));
@@ -1085,7 +1118,7 @@ const careOf = name => (S.settings.care || {})[keyOf(name)] || null;
 const CARE_CUES = {
   pressure: 'Easy does it: breathe out as you push, no big breath-hold, 8 to 12 smooth reps. Aches? Swap it.',
   joint: 'Smooth, controlled reps. Stop if it hurts.',
-  cramp: 'Cramped here before. A bit lighter and slower, sip water between sets.',
+  cramp: 'Cramps here before: slow, steady reps, and sip water between sets.',
 };
 const REHAB_CUE = 'Shoulder care: light and smooth, stop well before it burns. Your PT\'s numbers win if you have them.';
 
@@ -2669,7 +2702,7 @@ function noteInfo(x, date) {
     case 'lift-easy': return { title: `${L} felt easy`, body: [`Next time, hit the top of your range on every set and it jumps two steps instead of one. Otherwise, two more reps a set.`, `Lasts until you do ${L} again.`], q };
     case 'lift-hard': return { title: `${L} felt hard`, body: [`Next time, ${L} stays at the same weight, even if you hit your reps. Own it first.`, 'Rough day overall? Write “tired” or “sick” too and it won’t count as a miss.'], q };
     case 'lift-pain': return { title: `Pain on ${L}`, body: [`Next time, ${L} stays at the same weight with a reminder to keep it light.`, 'Keeps happening? Tap ⋯ on the lift, then “Does it bother you?”, and I’ll go easier on it every time.', 'Sharp pain, or pain that sticks around a few days, is worth getting checked.'], q };
-    case 'lift-cramp': return { title: `Cramp on ${L}`, body: [`Next time, ${L} gets a reminder: a bit lighter and slower, sip water between sets.`], q };
+    case 'lift-cramp': return { title: `Cramp on ${L}`, body: [`Next time, ${L} starts a step lighter (or where you finished), with slow reps and water between sets.`], q };
     case 'lift-note': return { title: `Note for ${L}`, body: [`This shows on ${L} next time, right under “Last time”.`, 'Easy, hard, heavy, pain, or cramp in the same sentence also change the plan.'], q };
     case 'sore-part': return { title: `Sore ${x.word}`, body: [`Through ${until(2)}, lifting days offer to work around your ${G}. One tap and other muscles fill in.`, 'Yoga leans toward Flexibility for 3 days too.', live(2)], q };
     case 'pain-part': return { title: `${cap(x.word)} pain`, body: [`Through ${until(4)}, lifting days offer to work around your ${G}.`, 'Yoga leans toward Flexibility for 3 days.', 'Sharp or lasting pain is worth getting checked.', live(4)], q };
@@ -2989,8 +3022,11 @@ function newRecords(w) {
 function restFor(w, e) {
   const base = S.settings.restSec;
   if (!S.settings.smartRest) return base;
-  const grp = w.exercises.filter(x => x.group === e.group).map(targetOf);
-  return Math.max(...grp.map(t => (t.kind === 'iso' ? base : Math.max(base, t.max != null && t.max <= 8 ? 180 : t.min != null && t.min >= 12 ? 120 : 150))));
+  // Small lifts and core moves get the short timer, judged by name too: lifts added mid-workout used
+  // to be saved as compound by default (pec fly, hip adduction, Pallof).
+  const small = x => targetOf(x).kind === 'iso' || ISO_WORDS.test(normName(x.name)) || SMALL_LIFT.test(x.name) || CORE_WORDS.test(x.name);
+  const grp = w.exercises.filter(x => x.group === e.group).map(x => ({ ...targetOf(x), small: small(x) }));
+  return Math.max(...grp.map(t => (t.small ? base : Math.max(base, t.max != null && t.max <= 8 ? 180 : t.min != null && t.min >= 12 ? 120 : 150))));
 }
 
 function setEnergy(v) {
@@ -4357,7 +4393,7 @@ function openSetSheet(w, i, j) {
   S.sheet = { kind: 'set', wid: w.id, i, j, w: s.w === '' ? '' : String(s.w), r: s.r === '' ? '' : String(s.r), later: later.length, chain };
   renderSheet();
 }
-const EX_DEFAULT = { name: '', sets: 3, min: 8, max: 12, inc: UP, kind: 'compound', body: 'upper', unit: 'reps', note: '', place: 'gym' };
+const EX_DEFAULT = { name: '', sets: 3, min: 8, max: 12, inc: UP, kind: '', body: '', unit: 'reps', note: '', place: 'gym' };
 const exData = x => ({ name: x.name, sets: x.sets, min: x.min ?? '', max: x.max ?? '', inc: x.inc || UP, kind: x.kind, body: x.body, unit: x.unit || 'reps', note: x.note || '', place: x.place === 'home' ? 'home' : 'gym' });
 // Program mode edits a day or saved workout; session mode (wid set) changes just today's session.
 function openExSheet(g, e) {
@@ -5762,7 +5798,8 @@ function sheetItem(id) {
   const x = S.sheet.data;
   let min = num(x.min), max = num(x.max);
   if (min != null && max != null && min > max) [min, max] = [max, min];
-  return { id: id || uid('e'), name: String(x.name).trim(), sets: +x.sets, min, max, inc: +x.inc, kind: x.kind, body: x.body, stepSet: true, unit: x.unit, note: String(x.note).trim(), ...(x.place === 'home' ? { place: 'home' } : {}) };
+  // A new lift's type (isolation or compound, upper or lower) comes from its name unless you picked one.
+  return classify({ id: id || uid('e'), name: String(x.name).trim(), sets: +x.sets, min, max, inc: +x.inc, kind: x.kind || '', body: x.body || '', stepSet: true, unit: x.unit, note: String(x.note).trim(), ...(x.place === 'home' ? { place: 'home' } : {}) });
 }
 function findPlanItem(plan, pid) {
   for (const g of plan.groups || []) { const k = g.findIndex(x => x.id === pid); if (k >= 0) return { g, k }; }
