@@ -1,7 +1,7 @@
 'use strict';
 /* Lift Log: an offline workout tracker. Everything is stored on this device in IndexedDB. */
 
-const APP_VERSION = '2.30.1';
+const APP_VERSION = '2.30.2';
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 const DAY_SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
@@ -772,11 +772,13 @@ function coachPlan(t, recent, opts = {}) {
   const fill = v => Array(t.sets).fill(v);
   // No rep target (like max-rep pull-ups): build total reps, then add weight once you reach about 9 a set.
   if (t.min == null && t.max == null) {
+    // "Just one more" shows in the sets too: the extra rep goes where your reps dropped off (12, 11, 11 → 12, 12, 11).
+    const oneMore = a => { const b = a.slice(), k = b.findIndex((r, i) => i > 0 && r < b[i - 1]); b[k < 0 ? 0 : k] = (b[k < 0 ? 0 : k] || 0) + 1; return b; };
     // Bodyweight (often at home, with no weights around): keep building reps, compared over today's set count.
     if (!top) {
       const n = Math.min(t.sets, reps.length), total = sum(reps.slice(0, n)), per = n ? total / n : 0;
       const tip = per >= 20 ? ' Getting easy? Slow the lowering to 3 seconds, or try a harder version.' : reps.length && Math.max(...reps) < 5 ? ' Under 5 a set? A band or slow lowering reps help.' : '';
-      return plan('beat', fill(0), Array.from({ length: t.sets }, (_, k) => at(reps, k)), `Beat ${total} ${unit} total${n < reps.length ? ` across ${n} sets` : ''}. Just one more.${tip}`);
+      return plan('beat', fill(0), oneMore(Array.from({ length: t.sets }, (_, k) => at(reps, k))), `Beat ${total} ${unit} total${n < reps.length ? ` across ${n} sets` : ''}. Just one more.${tip}`);
     }
     const total = sum(reps);
     if (unit === 'reps' && last.sets.length >= t.sets && total >= 9 * t.sets && opts.energy !== 'low') {
@@ -784,7 +786,7 @@ function coachPlan(t, recent, opts = {}) {
       return plan('up', fill(w), fill(6), `${total} reps last time. Add ${w - top} lb (a belt, a dumbbell, or a harder version) and build back up.`);
     }
     const tip = unit === 'reps' && !top && reps.length && Math.max(...reps) < 5 ? ' Under 5 a set? A band or slow lowering reps help.' : '';
-    return plan('beat', prev, reps, `Beat ${total} ${unit} total. Just one more.${tip}`);
+    return plan('beat', prev, oneMore(Array.from({ length: t.sets }, (_, k) => at(reps, k))), `Beat ${total} ${unit} total. Just one more.${tip}`);
   }
   const lo = t.min ?? t.max, hi = t.max ?? t.min;
   const holdWhy = opts.energy === 'low' ? (opts.sick ? "you're sick" : "energy's low") : opts.tired || (opts.noted === 'lift-pain' ? 'it hurt last time' : opts.noted === 'lift-hard' ? 'it felt hard last time' : '');
@@ -878,7 +880,7 @@ function coachPlan(t, recent, opts = {}) {
   }
   return plan('reps', prev,
     Array.from({ length: t.sets }, (_, k) => Math.min(hi, Math.max(lo, at(reps, k) + 1))),
-    `Same weight, one more rep a set (top is ${hi}).`);
+    `${top ? "Same weight, one" : "One"} more rep a set (top is ${hi}).`);
 }
 
 // Tailor the rest of today's sets to how this one went. Reps usually drop a little from set to set,
